@@ -12,4 +12,9 @@ object TouchSelection {
         val nx=(x-(width-w)/2)/w;val ny=(y-(height-h)/2)/h
         return if(nx>=0f && nx<1f && ny>=0f && ny<1f)nx to ny else null
     }
+    /** GBA direction mask for a drag offset: the dominant axis only, nothing inside the dead zone. */
+    fun direction(dx:Float,dy:Float,deadZone:Float):Int {
+        if(!dx.isFinite() || !dy.isFinite() || dx*dx+dy*dy<deadZone*deadZone)return 0
+        return if(kotlin.math.abs(dx)>=kotlin.math.abs(dy)){if(dx>0f)16 else 32}else{if(dy>0f)128 else 64}
+    }
 }

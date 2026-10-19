@@ -111,6 +111,11 @@ fun TouchscreenSettings(settings:GameSettings,onEdit:()->Unit){
         Text("Vibration feedback")
     }
     Row(verticalAlignment=Alignment.CenterVertically){
+        Switch(settings.touch.touchOnly,{settings.touch.touchOnly=it;settings.touch.save()})
+        Text("Touch-only mode")
+    }
+    Text("Hides the on-screen gamepad. Tap menus and the map to select, drag to move the cursor and two-finger tap to go back. A small bar keeps B, Start, Select, L, R and Pause.",fontSize=12.sp)
+    Row(verticalAlignment=Alignment.CenterVertically){
         Switch(settings.touch.experimentalClicks,{settings.touch.experimentalClicks=it;settings.touch.save()})
         Text("Experimental touch selection")
     }
@@ -273,6 +278,28 @@ fun TouchOverlay(settings:GameSettings,input:GameInput,editing:Boolean,onPause:(
                     Button(onClick={showButtons=false},modifier=Modifier.fillMaxWidth()){Text("Done")}
                 }
             }
+        }
+    }
+}
+
+/** Touch-only mode: no gamepad, just the buttons a tap cannot express. */
+@Composable
+fun TouchOnlyBar(settings:GameSettings,input:GameInput,onPause:()->Unit){
+    val view=LocalView.current
+    val haptic by rememberUpdatedState(settings.touch.vibration)
+    val feedback:()->Unit={if(haptic)view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);Unit}
+    val keys=listOf(TouchControl.B,TouchControl.START,TouchControl.SELECT,TouchControl.L,TouchControl.R)
+    DisposableEffect(Unit){onDispose{keys.forEach{input.set("bar:"+it.name,0)}}}
+    Box(Modifier.fillMaxSize().safeDrawingPadding().padding(8.dp)){
+        Row(Modifier.align(Alignment.TopEnd),horizontalArrangement=Arrangement.spacedBy(6.dp)){
+            keys.forEach{control->
+                TouchKey(control.label,Modifier.size(48.dp,34.dp),settings.opacity,false,feedback,
+                    {down->input.set("bar:"+control.name,if(down)control.mask else 0)},square=true)
+            }
+            TouchKey(if(settings.fastForward)settings.multiplier.toString()+"x" else ">>",Modifier.size(48.dp,34.dp),
+                settings.opacity,false,feedback,{down->if(down){settings.fastForward=!settings.fastForward}},
+                square=true,active=settings.fastForward)
+            TouchKey("Pause",Modifier.size(58.dp,34.dp),settings.opacity,false,feedback,{down->if(down)onPause()},square=true)
         }
     }
 }

@@ -412,7 +412,8 @@ private fun GameScreen(settings:GameSettings,input:GameInput,onExit:()->Unit,onS
     val audioMode=settings.audioMode
     val sound=settings.sound
     val volume=settings.volume
-    val touchClicks=settings.touch.experimentalClicks
+    val touchOnly=settings.touch.touchOnly
+    val touchClicks=settings.touch.experimentalClicks||touchOnly
     val bubbleSize=settings.bubbleSize
     val bubbleLength=settings.bubbleLength
     LaunchedEffect(settings.pauseRequest){
@@ -462,14 +463,17 @@ private fun GameScreen(settings:GameSettings,input:GameInput,onExit:()->Unit,onS
         surface?.soundEnabled=sound
         surface?.volume=volume
         surface?.experimentalClicks=touchClicks
+        surface?.touchOnly=touchOnly
         surface?.bubbleSize=bubbleSize
         surface?.bubbleLength=bubbleLength
     }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(factory={ctx->GameSurface(ctx){error->
             activity.runOnUiThread{failure=error;paused=true}
-        }.also{surface=it;it.inputSource=input.buttons}},modifier=Modifier.fillMaxSize())
-        if((settings.touchVisible&&!paused)||editingTouch)TouchOverlay(settings,input,editingTouch,
+        }.also{surface=it;it.inputSource=input.buttons;it.onDirection={mask->input.set("drag",mask)}}},modifier=Modifier.fillMaxSize())
+        if(touchOnly&&settings.touchVisible&&!paused&&!editingTouch)TouchOnlyBar(settings,input,
+            onPause={paused=true;page="main";input.clear();settings.pad.clear();settings.holdFast=false})
+        else if((settings.touchVisible&&!paused)||editingTouch)TouchOverlay(settings,input,editingTouch,
             onPause={paused=true;page="main";input.clear();settings.pad.clear();settings.holdFast=false},
             onSave={settings.touch.save();editingTouch=false},
             onCancel={settings.touch.layout.restore(originalTouch);settings.touch.vibration=originalVibration;editingTouch=false})

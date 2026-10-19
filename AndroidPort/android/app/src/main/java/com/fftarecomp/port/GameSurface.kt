@@ -29,31 +29,58 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
     @Volatile var soundEnabled = true
     @Volatile var volume = 0.8f
     @Volatile var experimentalClicks=false
+    @Volatile var touchOnly=false
+    /** Receives the held GBA direction while a touch-only drag steers. */
+    @Volatile var onDirection:(Int)->Unit={}
     @Volatile var bubbleSize=1f
     @Volatile var bubbleLength=1f
     private val taps=java.util.concurrent.ConcurrentLinkedQueue<ScreenTap>()
     private var touchingGame=false
+    private var dragging=false
+    private var twoFinger=false
+    private var downTime=0L
     private var downX=0f
     private var downY=0f
     // Compose sends touches on its buttons to those buttons, never this underlying View.
     // Only complete single-pointer gestures that began on the game can become clicks.
+    // Touch-only mode adds two gestures to single taps: a one-finger drag holds the
+    // D-pad direction of its offset, and a quick two-finger tap presses B (back).
     override fun onTouchEvent(event:MotionEvent):Boolean {
-        if(!experimentalClicks || gamePaused || !appActive){touchingGame=false;return false}
+        if(!experimentalClicks || gamePaused || !appActive){endGesture();return false}
+        val density=resources.displayMetrics.density
+        val slop=(if(touchOnly)32 else 48)*density
         when(event.actionMasked){
-            MotionEvent.ACTION_DOWN->{touchingGame=true;downX=event.x;downY=event.y}
-            MotionEvent.ACTION_POINTER_DOWN,MotionEvent.ACTION_CANCEL->touchingGame=false
+            MotionEvent.ACTION_DOWN->{
+                touchingGame=true;dragging=false;twoFinger=false
+                downX=event.x;downY=event.y;downTime=event.eventTime
+            }
+            MotionEvent.ACTION_POINTER_DOWN->
+                if(touchOnly && touchingGame && !dragging && event.pointerCount==2)twoFinger=true
+                else {touchingGame=false;onDirection(0)}
+            MotionEvent.ACTION_MOVE->if(touchOnly && touchingGame && !twoFinger){
+                val dx=event.x-downX;val dy=event.y-downY
+                if(!dragging && dx*dx+dy*dy>=slop*slop)dragging=true
+                if(dragging)onDirection(TouchSelection.direction(dx,dy,slop/2))
+            }
+            MotionEvent.ACTION_CANCEL->endGesture()
             MotionEvent.ACTION_UP->{
-                if(touchingGame && kotlin.math.abs(event.x-downX)<48*resources.displayMetrics.density &&
-                    kotlin.math.abs(event.y-downY)<48*resources.displayMetrics.density){
+                if(touchingGame && twoFinger){
+                    if(event.eventTime-downTime<500 && taps.size<8)taps.offer(ScreenTap(downX/width,downY/height,true))
+                }else if(touchingGame && !dragging && kotlin.math.abs(event.x-downX)<slop &&
+                    kotlin.math.abs(event.y-downY)<slop){
                     val view=frames.displayedView
                     val point=TouchSelection.map(event.x,event.y,width,height,view)
                     if(point!=null && taps.size<8)taps.offer(ScreenTap(event.x/width,event.y/height,
                         event.buttonState and MotionEvent.BUTTON_SECONDARY!=0))
                 }
-                touchingGame=false
+                endGesture()
             }
         }
         return true
+    }
+    private fun endGesture(){
+        if(dragging)onDirection(0)
+        touchingGame=false;dragging=false;twoFinger=false
     }
     @Volatile var performance = "Starting..."
     @Volatile private var running = false

@@ -50,10 +50,13 @@ class TouchLayout(context:Context){
     }
     var vibration by mutableStateOf(prefs.getBoolean("vibration",false))
     var experimentalClicks by mutableStateOf(prefs.getBoolean("experimental_clicks",false))
+    /** No virtual gamepad: taps select, drags steer, two-finger tap goes back. */
+    var touchOnly by mutableStateOf(prefs.getBoolean("touch_only",false))
     fun save(){
         prefs.edit().apply{
             putBoolean("vibration",vibration)
             putBoolean("experimental_clicks",experimentalClicks)
+            putBoolean("touch_only",touchOnly)
             putInt("layout_revision",1)
             layout.positions.forEach{(control,pose)->
                 putFloat(control.name+"_x",pose.x);putFloat(control.name+"_y",pose.y)
