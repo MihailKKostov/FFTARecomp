@@ -61,7 +61,7 @@ repository root is not changed; only `AndroidPort/` is.
     stays in the picture so translucent menus compose as usual.
   - Host sprite copies are not drawn in the extended rows (stale positions).
   - World taps accept any map row (Y 22-330), so towns off the native screen
-    can be tapped; measured: a tap on the culled flower town sends Marche.
+    can be tapped (from 0.30 the first tap only moves the cursor).
   - Landscape: 2131-frame world map session hash-identical before/after.
 
 ## Done (0.29-android-preview)
@@ -97,10 +97,39 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
    to the bottom at its native x. Shop lists keep: list bottom, reply top.
 9. The 8 extra columns of the 256-wide portrait view showed wrapped scenery
    (Prison edge, world map strips) and the UI used a 4.5x scale over a 4.22x
-   picture -> portrait renders exactly 240 columns.
+   picture -> portrait still renders 256 columns (scenes need the margin) but
+   shows only the central 240 across the screen width (`Engine::set_view`,
+   GameSurface and TouchSelection use the same crop).
 10. The blurred backdrop showed hard stripes (each native row stretched ~15x)
    -> the engine writes a 30x20 grid of 8x8 averages into unused padding rows
    and GameSurface stretches it with linear filtering.
+11. Between town menus (menu closing, list opening, shop fade-in) the game is
+   in no recognised menu state, so its UI fell back into the picture at its
+   native rows (mid-screen in portrait) for 5-10 frames -> in portrait the
+   whole town scene is recognised by its BG control (4c03 4e02 0b08 0a08,
+   the values MenuScene::layout_menus requires) and its UI stays docked.
+12. The trader bubble's closing animation (rows 13-67) docked to the bottom,
+   and a shop list's opening animation (rows 6-29 growing to 6-85) docked to
+   the top, then jumped -> a bubble is a block touching a screen edge and
+   ending above row 72; in shops everything else docks to the bottom.
+13. Buy/Sell/Leave (and Pub, Prison menus) appeared at the bottom left while
+   sliding in or out -> the sliding block keeps the translation of the
+   complete menu's thumb placement (`Dock::Follow`), so it slides in and out
+   of its own left edge as on the original screen.
+14. Stat digits the shop parks beside the screen (x -24 and 288) showed:
+   in portrait as "0"/"4" floating in the thumb zone, in landscape as digit
+   columns in the wide margins -> UI blocks outside the 240 columns are not
+   placed, and those digit objects are not drawn outside the native columns.
+15. The quantity prompt drew parked BG2/BG3 tiles below the native rows ->
+   a docked town scene's menu planes are not drawn in the extended rows.
+
+Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
+Pub (Rumors), Prison and Party flows, plus landscape shop frames.
+
+**World map taps (0.30).** A tap on a place other than the cursor's only
+moves the cursor there (the game shows its name); a tap within 12 pixels of
+the cursor moves Marche there (`ffta_battle_mouse::world_select`).
+Measured: first tap on Marche's town moves the cursor, second tap travels.
 
 ## Measured with the headless runner (USA ROM, new game, 1080x2400)
 

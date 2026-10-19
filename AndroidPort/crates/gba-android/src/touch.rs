@@ -44,31 +44,58 @@ pub fn canvas_blocks(pixels:&[dialogue::UiPixel])->Vec<([i32;4],(usize,usize))>{
 /// Where a block of the main canvas goes in a portrait docking frame. Decided
 /// only by its native position, never by scene classification or its current
 /// size, so opening animations and late classification cannot make it jump.
-fn dock_for(state:&dialogue::DialogueState,clusters:usize,block:[i32;4],(y0,y1):(usize,usize))->Dock{
+fn dock_for(state:&dialogue::DialogueState,menu:Option<[i32;4]>,block:[i32;4],(y0,y1):(usize,usize))->Dock{
+    // A speech bubble is anchored to a screen edge in the upper rows, also while
+    // it opens or closes (shop lists open from the top rows but never touch an edge).
+    let bubble=(block[0]<=0 || block[2]>=240) && y1<=72;
     if state.shop_layout {
-        // Shop lists sit at the bottom; a separate trader reply stays on top.
-        return if clusters>1 && y0<8 && y1-y0<=72 {Dock::Top} else {Dock::Bottom};
+        // The town menu sliding out of (or into) the left edge moves with its thumb
+        // block; before one was seen, with the measured root window (shop, pub:
+        // origin 8,92 = native x 0..96), which slides before the game reports it.
+        let menu=menu.filter(|m|(block[1]-m[1]).abs()<=8).or_else(||
+            (block[0]<=0 && (64..=100).contains(&block[1])).then_some([0,block[1],96,block[3]]));
+        if let Some(m)=menu.filter(|m|block[0]<=m[0] && block[2]<=m[2]) {return Dock::Follow(m);}
+        // Shop lists sit at the bottom; the trader's text stays on top.
+        return if bubble {Dock::Top} else {Dock::Bottom};
     }
-    if y0<8 {Dock::Top}
-    else if block[2]<=120 && block[2]-block[0]<=128 {Dock::Thumb}
+    if y0<8 || bubble {Dock::Top}
+    else if block[2]<=120 && block[2]-block[0]<=128 {thumb(state,block)}
     else {Dock::Bottom}
+}
+
+/// A town menu still sliding in from the left edge moves with the thumb
+/// placement of the complete window, as it slides on the original screen.
+fn thumb(state:&dialogue::DialogueState,block:[i32;4])->Dock{
+    match state.town_menu_x {
+        Some((left,right)) if block[0]<=left && block[2]<right => Dock::Follow([left,block[1],right,block[3]]),
+        _ => Dock::Thumb,
+    }
 }
 
 /// Screen pieces of UI layer `index`. In portrait battle-style scenes the main
 /// canvas is cut into blocks placed by `dock_for`; town menus drawn on the
 /// extra layer use the same thumb placement. Everything else is one piece.
-pub fn pieces(bus:&MemMap,band:Band,index:usize)->Vec<Layout>{
+/// The town menu block of a town frame's main canvas (placed in the thumb zone).
+pub fn town_menu(state:&dialogue::DialogueState)->Option<[i32;4]>{
+    if !state.town_layout || state.layer().is_none() {return None;}
+    canvas_blocks(&state.pixels).into_iter().filter(|(b,_)|b[2]>0 && b[0]<240).find_map(|(b,c)|match dock_for(state,None,b,c) {
+        Dock::Thumb=>Some(b),Dock::Follow(m)=>Some(m),_=>None})
+}
+
+/// `menu`: the last town menu block (`town_menu`) while its scene lasts.
+pub fn pieces(bus:&MemMap,band:Band,index:usize,menu:Option<[i32;4]>)->Vec<Layout>{
     let state=&bus.ffta_dialogue;
     let docked=band.h>160.*band.s+0.5;
     if docked && index==0 && !state.action_layout && state.layer().is_some() {
-        let blocks=canvas_blocks(&state.pixels);
-        let clusters=row_clusters(&state.pixels).len();
-        let placed:Vec<_>=blocks.iter().map(|&(b,c)|(b,dock_for(state,clusters,b,c))).collect();
-        if !placed.is_empty() {return Layout::docked(band,state.style.scale,&placed);}
+        // Blocks entirely beside the native screen are invisible on the original
+        // (the shop parks stat digits at x -24) and must stay so.
+        let blocks:Vec<_>=canvas_blocks(&state.pixels).into_iter().filter(|(b,_)|b[2]>0 && b[0]<240).collect();
+        let placed:Vec<_>=blocks.iter().map(|&(b,c)|(b,dock_for(state,menu,b,c))).collect();
+        return Layout::docked(band,state.style.scale,&placed);
     }
     if docked && index==1 && state.town_layout && state.extra.kind==PanelKind::Actions && state.extra.active() {
         if let Some(b)=dialogue::pixel_bounds(&state.extra.pixels) {
-            return Layout::docked(band,state.style.scale,&[(b,Dock::Thumb)]);
+            return Layout::docked(band,state.style.scale,&[(b,thumb(state,b))]);
         }
     }
     layout(bus,band,index).into_iter().collect()
@@ -166,7 +193,7 @@ impl Engine {
         let mut handled=false;
         if (battle::MenuScene::read(&self.machine.bus).is_some()||state.shop_layout)&&index.is_some(){
             let i=index.unwrap();
-            if let Some(source)=pieces(&self.machine.bus,band,i).iter().find_map(|l|l.source(px,py)){
+            if let Some(source)=pieces(&self.machine.bus,band,i,self.town_menu).iter().find_map(|l|l.source(px,py)){
                 let mut nx=(source%480) as f32-120.;let ny=(source/480) as f32;
                 if !(state.town_layout||state.shop_layout||state.site_layout||state.extra.kind==PanelKind::Notice){
                     let bounds=if i==0{dialogue::panel_bounds(&state.pixels,&state.backing)}else{dialogue::panel_bounds(&state.extra.pixels,&state.extra.backing)};
@@ -201,7 +228,7 @@ impl Engine {
         let band=self.ui_band();
         let mut slot=0;
         for i in 0..2 {
-            let layouts=pieces(&self.machine.bus,band,i);
+            let layouts=pieces(&self.machine.bus,band,i,self.town_menu);
             if layouts.is_empty(){continue;}
             let state=&self.machine.bus.ffta_dialogue;
             let pixels=if i==0{&state.pixels}else{&state.extra.pixels};

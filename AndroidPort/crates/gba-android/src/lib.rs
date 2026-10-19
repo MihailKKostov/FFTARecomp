@@ -7,7 +7,7 @@ mod jni;
 mod audio;
 mod normal_audio;
 mod ui_layout;
-mod touch;
+pub mod touch;
 mod title_touch;
 mod world_map;
 mod scheduling;

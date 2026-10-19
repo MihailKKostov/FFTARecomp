@@ -103,6 +103,10 @@ pub struct DialogueState {
     pub view_height: f32,
     pub(crate) placement: Option<Placement>,
     pub(crate) wide_pass: bool,
+    /// Android portrait docking frame: UI blocks are placed at the screen edges.
+    pub docked: bool,
+    /// Native x extent (left, right) of the town menu window once fully shown.
+    pub town_menu_x: Option<(i32, i32)>,
 }
 
 pub fn enabled() -> bool {

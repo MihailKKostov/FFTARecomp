@@ -41,7 +41,7 @@ class ViewAndInputTest {
         assertEquals(AspectMode.WIDESCREEN,request.aspectFor(2400,1080))
         assertEquals(AspectMode.DEVICE,request.aspectFor(1080,2400))
         val view=ViewConfig.create(request.aspectFor(1080,2400),0,1080,2400)
-        assertEquals(240,view.width)
+        assertEquals(256,view.width)
         assertTrue(view.height>500)
         assertTrue(view.fillScreen)
     }

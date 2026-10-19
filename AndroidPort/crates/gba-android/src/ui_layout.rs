@@ -29,7 +29,9 @@ impl Band {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Dock { Top, Bottom, Thumb }
+pub enum Dock { Top, Bottom, Thumb,
+    /// Moved like the thumb block with these bounds (a menu sliding in or out).
+    Follow([i32; 4]) }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
@@ -91,12 +93,20 @@ impl Layout {
         let Band { s, x, y, w, h } = band;
         let k = s * size.clamp(0.5, 2.);
         let canvas_left = x + w * 0.5 - 240. * k;
+        let thumb = |r: [i32; 4]| {
+            let (pw, ph) = ((r[2] - r[0]) as f32 * k, (r[3] - r[1]) as f32 * k);
+            ((x + w - 0.08 * w - pw).max(x), (y + 0.80 * h - ph).max(y))
+        };
         blocks.iter().map(|&(r, dock)| {
             let (pw, ph) = ((r[2] - r[0]) as f32 * k, (r[3] - r[1]) as f32 * k);
             let (left, top) = match dock {
                 Dock::Top => (canvas_left + (r[0] + 120) as f32 * k, y + r[1] as f32 * k),
                 Dock::Bottom => (canvas_left + (r[0] + 120) as f32 * k, y + h - (160 - r[1]) as f32 * k),
-                Dock::Thumb => ((x + w - 0.08 * w - pw).max(x), (y + 0.80 * h - ph).max(y)),
+                Dock::Thumb => thumb(r),
+                Dock::Follow(m) => {
+                    let (left, top) = thumb(m);
+                    (left + (r[0] - m[0]) as f32 * k, top + (r[1] - m[1]) as f32 * k)
+                }
             };
             Self { rect: [(left - (r[0] + 120) as f32 * k).round(), (top - r[1] as f32 * k).round(), 480. * k, 160. * k],
                 clip: [left.round(), top.round(), pw.round(), ph.round()] }
@@ -156,6 +166,10 @@ mod tests {
         // A block that is still sliding in keeps the same translation (no jump).
         let sliding = Layout::docked(band, 1., &[([150, 137, 228, 157], Dock::Bottom)]);
         assert_eq!(sliding[0].rect, pieces[2].rect);
+        // A menu sliding off to the left keeps the thumb block's translation.
+        let closing = Layout::docked(band, 1., &[([0, 78, 72, 142], Dock::Follow(menu))]);
+        assert_eq!(closing[0].rect, pieces[1].rect);
+        assert_eq!(closing[0].clip[0], pieces[1].clip[0]);
     }
     #[test]
     fn short_or_invalid_frames_fall_back_to_the_letterbox() {

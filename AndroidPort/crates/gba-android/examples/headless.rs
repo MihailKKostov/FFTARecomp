@@ -31,7 +31,6 @@ struct View { extra_x: usize, extra_y: usize, base_width: f32 }
 fn device_view(screen: (u32, u32), zoom: i32) -> View {
     let ratio = screen.0.max(1) as f64 / screen.1.max(1) as f64;
     let (width, height) = if ratio >= 1.5 { ((160. * ratio).max(242.).min(1536.), 160.) }
-        else if ratio < 1. { (240., (240. / ratio).min(800.)) }
         else { (256., (256. / ratio).min(800.)) };
     let limit = (1536. / width).min(800. / height);
     let max_zoom = ((limit.ln() / 2f64.powf(1. / 6.).ln()).floor() as i32).clamp(0, 6);
@@ -151,6 +150,9 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
         eprintln!("ui params {params:?}\n  main {:?} extra {:?} kind {:?} action {} town {} shop {} site {} expanded {} padded {}",
             gba_core::ffta_dialogue::pixel_bounds(&state.pixels), gba_core::ffta_dialogue::pixel_bounds(&state.extra.pixels),
             state.extra.kind, state.action_layout, state.town_layout, state.shop_layout, state.site_layout, engine.expanded, engine.padded);
+        let io = &engine.machine.bus.io;
+        eprintln!("  regs {:04x} {:04x?}", u16::from_le_bytes([io[0], io[1]]), [8, 10, 12, 14].map(|o| u16::from_le_bytes([io[o], io[o + 1]])));
+        eprintln!("  blocks {:?}", gba_android::touch::canvas_blocks(&state.pixels).iter().map(|b| b.0).collect::<Vec<_>>());
     }
     for slot in 0..8 {
         let p = &params[slot * 9..slot * 9 + 9];

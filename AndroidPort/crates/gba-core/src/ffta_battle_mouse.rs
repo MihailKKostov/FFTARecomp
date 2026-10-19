@@ -784,13 +784,20 @@ fn world_cursor(mem:&MemMap)->Option<(usize,[u16;2],u16)> {
     if !(14..=224).contains(&x) || !(22..=330).contains(&y) || scroll>330 {return None;}
     Some((base,[x,y],scroll))
 }
+/// Map pixels around the world cursor that count as tapping its location.
+const WORLD_CONFIRM_RADIUS:i32=12;
 pub fn world_select(mem:&mut MemMap,x:f32,y:f32,confirm:bool)->bool {
     let Some((base,current,scroll))=world_cursor(mem) else{return false;};
     // Native rows plus, in tall views, any row of the map the cursor can reach.
     let map_y=y+scroll as f32;
     if !x.is_finite() || !y.is_finite() || !(0.0..240.0).contains(&x) || !(0.0..352.0).contains(&map_y){return false;}
-    let world_y=(map_y.round() as u16).clamp(22,330);
-    let x=x.round().clamp(14.,224.)as u8;let y=y.round().clamp(0.,159.)as u8;
+    let mut world_y=(map_y.round() as u16).clamp(22,330);
+    let mut x=x.round().clamp(14.,224.)as u8;let y=y.round().clamp(0.,159.)as u8;
+    // Two-step selection: a tap away from the cursor only moves it there; a tap
+    // on the cursor's own location (where it now rests) confirms, like A.
+    let near=(current[0] as i32-x as i32).abs()<=WORLD_CONFIRM_RADIUS && (current[1] as i32-world_y as i32).abs()<=WORLD_CONFIRM_RADIUS;
+    let confirm=confirm && near;
+    if near {x=current[0] as u8;world_y=current[1];}
     let s=&mut mem.ffta_battle_mouse;
     if let Some(r)=s.world_request.as_mut(){if r.base==base && r.x==x && r.world_y==Some(world_y) {r.confirm|=confirm;r.deadline=mem.frames+120;return true;}}
     s.cancel();
@@ -1659,8 +1666,15 @@ mod tests {
         assert_eq!(m.cpu.regs[0],246);assert_eq!(m.bus.ewram,before);
         m.bus.frames=1;m.cpu.regs[15]=p.commit;m.cpu.regs[0]=191;m.ffta_battle_mouse_entry();
         assert_eq!(m.cpu.regs[0],190); // pending guest key release must not drift by one pixel
+        // A tap away from the cursor only moves it: no A press follows.
         let mut presses=0;
         for f in 1..15{m.bus.frames=f;presses+=usize::from(keys(&mut m.bus,RELEASED)==0x3fe);}
+        assert_eq!(presses,0);
+        // The cursor now rests there; tapping that location again confirms.
+        for(o,v)in[(0x2c16,190u16),(0x2c18,246)]{m.bus.ewram[o..o+2].copy_from_slice(&v.to_le_bytes());}
+        assert!(world_select(&mut m.bus,193.,87.,true));
+        let mut presses=0;
+        for f in 15..30{m.bus.frames=f;presses+=usize::from(keys(&mut m.bus,RELEASED)==0x3fe);}
         assert_eq!(presses,4);
         m.bus.ewram[0x2c10]=0;
         assert!(!world_select(&mut m.bus,100.,90.,true));

@@ -112,6 +112,19 @@ pub fn ffta_zoom_rows_ready(mem: &MemMap) -> bool {
             || (mem.world_hud.enabled && ffta_world_map(mem, bg)))
 }
 
+/// Docked (portrait) town scene: shop, pub, prison... Measured USA: the whole
+/// scene keeps the town-menu BG control that MenuScene::layout_menus requires
+/// (BG0/BG1 the picture, BG2/BG3 the menu planes).
+fn docked_town_scene(mem: &MemMap) -> bool {
+    mem.ffta_dialogue.docked && mem.ffta_dialogue.separate && io16(mem, 0) & 0x0f07 == 0x0f00
+        && [8, 10, 12, 14].map(|o| io16(mem, o)) == [0x4c03, 0x4e02, 0x0b08, 0x0a08]
+}
+/// BGs drawn in the rows beyond the native screen. A docked town scene's menu
+/// planes hold only parked tiles there (stat digits under the quantity prompt).
+fn zoom_bg(mem: &MemMap, dispcnt: u16, bg: usize) -> bool {
+    dispcnt & (0x100 << bg) != 0 && !(bg >= 2 && docked_town_scene(mem))
+}
+
 pub fn render_ffta_zoom_rows(mem: &mut MemMap) {
     let timer=mem.ffta_dialogue.profile.enabled.then(std::time::Instant::now);
     render_ffta_zoom_rows_impl(mem);
@@ -153,7 +166,7 @@ fn render_ffta_zoom_rows_impl(mem: &mut MemMap) {
         for bg in 0..4 {
             // UI text planes belong to this scanline too: omitting them
             // leaves extended OBJ text without its panel background.
-            if dispcnt & (0x100 << bg) != 0 {
+            if zoom_bg(mem, dispcnt, bg) {
                 render_text_bg(mem, bg, line, &mut backgrounds[bg]);
                 used[bg] = true;
             }
@@ -328,7 +341,7 @@ fn render_zoom_lane(
         let line = sy as usize;
         let mut used = [false; 4];
         for bg in 0..4 {
-            if dispcnt & (0x100 << bg) != 0 {
+            if zoom_bg(mem, dispcnt, bg) {
                 backgrounds[bg][..rw].fill(TRANSPARENT);
                 render_text_bg(mem, bg, line, &mut backgrounds[bg]);
                 used[bg] = true;
@@ -606,8 +619,12 @@ fn begin_dialogue_frame(mem: &mut MemMap) {
     mem.ffta_dialogue.town_layout=false;
     mem.ffta_dialogue.shop_layout=false;
     mem.ffta_dialogue.site_layout=false;
+    mem.ffta_dialogue.town_menu_x=None;
     mem.ffta_dialogue.extra.kind=crate::ffta_dialogue::PanelKind::None;
     mem.ffta_dialogue.extra.bounds=None;
+    // Docked (portrait) UI must never fall back into the picture in a town scene
+    // (fade-in, menus opening and closing): its native rows are mid-screen there.
+    let town_scene_held=docked_town_scene(mem);
     let shared_menus=if mem.ffta_dialogue.separate && !mem.ffta_dialogue.reference_frame {
         Some(crate::ffta_battle_mouse::MenuScene::layout_menus(mem))
     }else{None};
@@ -616,8 +633,8 @@ fn begin_dialogue_frame(mem: &mut MemMap) {
     }else{None};
     let terrain=(0..4).any(|bg|ffta_terrain(mem,bg));
     if (extra()==0 && crate::mem::extra_y()==0) || !crate::ffta_dialogue::enabled()
-        || (!mem.ffta_movement.enabled && site_menu.is_none()) || mem.ffta_bg_edge==FftaBgEdge::Wrap
-        || io16(mem,0)&0x87!=0 || (!terrain && site_menu.is_none()) {return;}
+        || (!mem.ffta_movement.enabled && site_menu.is_none() && !town_scene_held) || mem.ffta_bg_edge==FftaBgEdge::Wrap
+        || io16(mem,0)&0x87!=0 || (!terrain && site_menu.is_none() && !town_scene_held) {return;}
     if mem.ffta_dialogue.separate {
         let mut bounds=[240,160,0,0];let mut pieces=[0;3];
         for obj in mem.oam.chunks_exact(8) {
@@ -644,6 +661,8 @@ fn begin_dialogue_frame(mem: &mut MemMap) {
     let site=usa_shop_root || (site_menu.is_some() && pub_scene.is_none() && shop_root.is_none() && !shop);
     let town_scene=pub_scene.or(shop_root).or(if site {site_menu}else{None});
     let town=town_scene.is_some();
+    mem.ffta_dialogue.town_menu_x=town_scene.map(|m|(m.origin[0]-8,m.right-8));
+    let shop=shop || (town_scene_held && !town);
     mem.ffta_dialogue.shop_layout=shop;
     mem.ffta_dialogue.town_layout=town;
     mem.ffta_dialogue.site_layout=site;
@@ -2889,6 +2908,9 @@ fn render_sprites_extent(
         if (!mem.ffta_dialogue.wide_pass || mem.ffta_dialogue.placement.is_none()
             || (mem.ffta_dialogue.separate && !mem.ffta_dialogue.reference_frame))
             && (line < y || line >= y + bh) {continue;}
+        // The shop parks unused stat digits beside the screen (x -24, 288):
+        // invisible on hardware, so never drawn into a wider view either.
+        if mem.ffta_dialogue.shop_layout && shop_numeral([a0,a1,a2]) && (x+bw<=0 || x>=240) {continue;}
         let bounded=(-64..240).contains(&x) && (-64..160).contains(&y);
         let notice_object=mem.ffta_dialogue.extra.kind==crate::ffta_dialogue::PanelKind::Notice
             && crate::ffta_dialogue::notice_cursor([a0,a1,a2],x,y,mem.ffta_dialogue.extra.bounds);

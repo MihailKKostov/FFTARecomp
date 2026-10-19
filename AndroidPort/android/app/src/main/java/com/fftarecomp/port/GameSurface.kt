@@ -424,7 +424,10 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
         }
         val view=uploadedView ?: return
         val uiParams=uploadedUiParams
-        val scale = if(view.fillScreen)maxOf(screenWidth.toFloat()/view.width, screenHeight.toFloat()/view.height)
+        // Portrait shows only the native 240 columns across the full width (Engine::set_view).
+        val portraitCrop=view.fillScreen && screenHeight>screenWidth && view.extraX<=8
+        val scale = if(portraitCrop)screenWidth/240f
+            else if(view.fillScreen)maxOf(screenWidth.toFloat()/view.width, screenHeight.toFloat()/view.height)
             else minOf(screenWidth.toFloat()/view.width, screenHeight.toFloat()/view.height)
         var width = (view.width*scale).toInt(); var height=(view.height*scale).toInt()
         var left=(screenWidth-width)/2; var bottom=(screenHeight-height)/2
