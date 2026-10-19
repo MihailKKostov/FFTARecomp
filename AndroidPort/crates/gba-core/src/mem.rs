@@ -219,6 +219,7 @@ pub struct MemMap {
     /// Host-only: the frame will not be presented, so skip drawing it. Emulated
     /// state (HBlank DMA, IRQs, affine latches at line 0) is unaffected.
     pub skip_render: bool,
+    pub world_hud: crate::world_hud::WorldHud,
     pub frames: u64,
 
     /// 240×160 RGB555 output, written per scanline by the PPU.
@@ -355,6 +356,7 @@ impl MemMap {
             vphase: VPhase::Hblank,
             frame_ready: false,
             skip_render: false,
+            world_hud: Default::default(),
             frames: 0,
             framebuffer: vec![0; VISIBLE_WIDTH * VISIBLE_SCANLINES as usize],
             wide_framebuffer: vec![0; MAX_RENDER_WIDTH * MAX_RENDER_HEIGHT],

@@ -108,7 +108,8 @@ fn put_pixel(mem: &mut MemMap, line: usize, i: usize, color: u16) {
 pub fn ffta_zoom_rows_ready(mem: &MemMap) -> bool {
     crate::mem::extra_y() > 0
         && (mem.ffta_movement.enabled || mem.ffta_stage.enabled)
-        && (0..4).any(|bg| ffta_terrain(mem, bg) || crate::ffta_stage::layer(mem, bg).is_some())
+        && (0..4).any(|bg| ffta_terrain(mem, bg) || crate::ffta_stage::layer(mem, bg).is_some()
+            || (mem.world_hud.enabled && ffta_world_map(mem, bg)))
 }
 
 pub fn render_ffta_zoom_rows(mem: &mut MemMap) {
@@ -368,6 +369,8 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
         mem.ffta_dialogue.profile.raster_ns=0;
         mem.ffta_dialogue.profile.zoom_ns=0;
         begin_dialogue_frame(mem);
+        let world_map=ffta_world_map(mem,0)&&ffta_world_map(mem,1);
+        crate::world_hud::begin_frame(mem,world_map);
         if let Some(start)=profile {mem.ffta_dialogue.profile.setup_ns=start.elapsed().as_nanos() as u64;}
         mem.ffta_movement.sky_edges[0] = pal16(mem, 0);
     }
@@ -470,6 +473,36 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
     mem.aff_ref[2] = mem.aff_ref[2].wrapping_add(io16(mem, 0x32) as i16 as i32);
     mem.aff_ref[3] = mem.aff_ref[3].wrapping_add(io16(mem, 0x36) as i16 as i32);
 
+    if mem.world_hud.map_frame {
+        let ex=extra();
+        let used=(2..4).any(|bg|bg_used[bg] && bg_lines[bg][ex..ex+VISIBLE_WIDTH].iter().any(|&p|p!=TRANSPARENT));
+        crate::world_hud::note_menu_row(mem,line,used);
+    }
+    if mem.world_hud.active {
+        // Tall world map views: lift the HUD out of the picture (see world_hud.rs).
+        let ex=extra();
+        // Static HUD layers have nothing to show in the side columns either.
+        for bg in [2,3] {
+            bg_lines[bg][..ex].fill(TRANSPARENT);
+            bg_lines[bg][ex+VISIBLE_WIDTH..render_width()].fill(TRANSPARENT);
+        }
+        for x in 0..VISIBLE_WIDTH {
+            let wx=ex+x;
+            let mut hud=crate::world_hud::TRANSPARENT;
+            for bg in [2,3] {
+                if bg_used[bg] && bg_lines[bg][wx]!=TRANSPARENT {
+                    if hud==crate::world_hud::TRANSPARENT {hud=bg_lines[bg][wx];}
+                    bg_lines[bg][wx]=TRANSPARENT;
+                }
+            }
+            if obj_line[wx].color!=TRANSPARENT && obj_line[wx].priority==0
+                && crate::world_hud::in_hud_object(mem,x as i32,line as i32) {
+                hud=obj_line[wx].color;
+                obj_line[wx]=OBJ_EMPTY;
+            }
+            mem.world_hud.pixels[line*VISIBLE_WIDTH+x]=hud;
+        }
+    }
     let panel=mem.ffta_dialogue.placement.is_some() || mem.ffta_dialogue.extra.active();
     let extract_first=mem.ffta_dialogue.separate && !mem.ffta_dialogue.reference_dialogue;
     let ui_objects=if extract_first {
@@ -1712,7 +1745,7 @@ pub fn ffta_terrain(mem: &MemMap, bg: usize) -> bool {
 
 // Exact-ROM-gated map profile, paired planes rather than an arbitrary BG.
 // This is separate from battle terrain: the world map is a finite 256px plane.
-fn ffta_world_map(mem:&MemMap,bg:usize)->bool {
+pub fn ffta_world_map(mem:&MemMap,bg:usize)->bool {
     bg<2 && mem.ffta_movement.enabled && io16(mem,0)&0x0307==0x0300
         && io16(mem,8)==0xaa03 && io16(mem,10)==0xac02
 }
@@ -2810,6 +2843,13 @@ fn render_sprites_extent(
             continue;
         }
 
+        // Tall world map views pin the HUD separately (world_hud.rs) and redraw
+        // culled towns themselves: in the extended map rows neither screen-fixed
+        // HUD objects nor host copies (which keep stale positions there) are drawn.
+        if mem.world_hud.map_frame && mem.ffta_movement.zoom_output
+            && (coordinates.is_some() || crate::world_hud::hud_object(a0, a2)) {
+            continue;
+        }
         let affine = a0 & 0x100 != 0;
         if !affine && a0 & 0x200 != 0 {
             continue; // disabled

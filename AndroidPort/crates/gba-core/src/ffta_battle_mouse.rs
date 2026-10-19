@@ -16,6 +16,9 @@ struct Profile {
 struct Request {
     x: u8,
     y: u8,
+    /// World map only: target map row, so taps above or below the native
+    /// screen (tall views show the whole map) reach their town.
+    world_y: Option<u16>,
     base: usize,
     deadline: u64,
     confirm: bool,
@@ -703,6 +706,7 @@ pub fn select(mem: &mut MemMap, x: u8, y: u8, confirm: bool) -> bool {
     state.request = Some(Request {
         x,
         y,
+        world_y: None,
         base: scene.base,
         deadline: mem.frames + 120,
         confirm,
@@ -782,13 +786,16 @@ fn world_cursor(mem:&MemMap)->Option<(usize,[u16;2],u16)> {
 }
 pub fn world_select(mem:&mut MemMap,x:f32,y:f32,confirm:bool)->bool {
     let Some((base,current,scroll))=world_cursor(mem) else{return false;};
-    if !x.is_finite() || !y.is_finite() || !(0.0..240.0).contains(&x) || !(0.0..160.0).contains(&y){return false;}
+    // Native rows plus, in tall views, any row of the map the cursor can reach.
+    let map_y=y+scroll as f32;
+    if !x.is_finite() || !y.is_finite() || !(0.0..240.0).contains(&x) || !(0.0..352.0).contains(&map_y){return false;}
+    let world_y=(map_y.round() as u16).clamp(22,330);
     let x=x.round().clamp(14.,224.)as u8;let y=y.round().clamp(0.,159.)as u8;
     let s=&mut mem.ffta_battle_mouse;
-    if let Some(r)=s.world_request.as_mut(){if r.base==base && r.x==x && r.y==y {r.confirm|=confirm;r.deadline=mem.frames+120;return true;}}
+    if let Some(r)=s.world_request.as_mut(){if r.base==base && r.x==x && r.world_y==Some(world_y) {r.confirm|=confirm;r.deadline=mem.frames+120;return true;}}
     s.cancel();
-    let same=current==[x as u16,(y as u16+scroll).clamp(22,330)];
-    s.world_request=Some(Request{x,y,base,confirm,deadline:mem.frames+120,wake_sent:false,committed:same.then_some(mem.frames)});
+    let same=current==[x as u16,world_y];
+    s.world_request=Some(Request{x,y,world_y:Some(world_y),base,confirm,deadline:mem.frames+120,wake_sent:false,committed:same.then_some(mem.frames)});
     if !same{s.event=Some(4096+y as u16*240+x as u16);}
     true
 }
@@ -1029,7 +1036,7 @@ impl Machine {
         let Some(r)=s.world_request else{return;};
         let Some((base,_,scroll))=world_cursor(&self.bus)else{return;};
         if r.base!=base || self.cpu.regs[4]!=0x02000000+base as u32 || self.bus.frames>r.deadline{return;}
-        self.cpu.regs[0]=if pc==p.commit{r.x as u32}else{(r.y as u32+scroll as u32).clamp(22,330)};
+        self.cpu.regs[0]=if pc==p.commit{r.x as u32}else{r.world_y.map_or((r.y as u32+scroll as u32).clamp(22,330),u32::from)};
         if pc==p.end-8 && r.committed.is_none() {self.bus.ffta_battle_mouse.world_request.as_mut().unwrap().committed=Some(self.bus.frames);}
     }
     pub fn ffta_battle_mouse_entry(&mut self) {

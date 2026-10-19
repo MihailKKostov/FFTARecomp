@@ -83,7 +83,7 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
     let mut out = vec![0u8; sw * sh * 3];
     for pixel in out.chunks_exact_mut(3) { pixel.copy_from_slice(&[6, 9, 8]); }
     let (ww, wh) = (240 + 2 * view.extra_x, 160 + 2 * view.extra_y);
-    let rect = engine.world_rect;
+    let rect = engine.texture_rect();
     // Padded scenes: blurred, dimmed band behind; only the band itself is drawn on top.
     let padded = engine.padded && view.extra_y > 0;
     let crop_x = view.extra_x <= 8;
@@ -307,6 +307,8 @@ fn main() -> Result<(), String> {
         held.retain(|h| h.1 > frame);
         let pressed = held.iter().fold(0u16, |m, h| m | h.0);
         KEYS.store((!pressed & 0x3ff) as u32, Ordering::Relaxed);
+        // OAM as it was while the frame was drawn (the game rewrites it at VBlank).
+        let oam_before = (!dumps.is_empty()).then(|| engine.machine.bus.oam.clone());
         engine.frame(speed as usize, view.extra_x, view.extra_y, false)?;
         frame_ns += engine.frame_ns;
         if hashes.is_some() {
@@ -317,6 +319,7 @@ fn main() -> Result<(), String> {
             std::fs::write(out.join(format!("{name}.ewram")), &engine.machine.bus.ewram).map_err(|e| e.to_string())?;
             std::fs::write(out.join(format!("{name}.iwram")), &engine.machine.bus.iwram).map_err(|e| e.to_string())?;
             std::fs::write(out.join(format!("{name}.oam")), &engine.machine.bus.oam).map_err(|e| e.to_string())?;
+            if let Some(oam) = &oam_before { std::fs::write(out.join(format!("{name}.oam0")), oam).map_err(|e| e.to_string())?; }
             std::fs::write(out.join(format!("{name}.io")), &engine.machine.bus.io).map_err(|e| e.to_string())?;
         }
         if !shots.is_empty() { engine.set_view(screen, view.extra_x, view.extra_y, true); }

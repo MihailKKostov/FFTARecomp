@@ -19,6 +19,9 @@ pub struct Engine {
     /// black-padded 240x160 picture.
     pub expanded: bool,
     pub padded: bool,
+    world_map: crate::world_map::WorldMap,
+    /// Rows the presented texture is shifted by (portrait world map), for taps.
+    view_shift: i32,
     pub world_rect: [f32;4],
     pub machine: Box<Machine>,
     code: Option<NativeCode>,
@@ -54,6 +57,12 @@ impl Engine {
     /// Screen rectangle of the whole world texture, as GameSurface draws it. A padded
     /// portrait/square frame shows only its 240x160 picture, fitted to the screen width,
     /// so the texture rectangle is placed to line that picture up.
+    /// Where GameSurface draws the world texture (world_rect without the tap shift).
+    pub fn texture_rect(&self)->[f32;4]{
+        let mut rect=self.world_rect;
+        rect[1]+=self.view_shift as f32*rect[3]/mem::render_height() as f32;
+        rect
+    }
     pub fn set_view(&mut self,screen:(u32,u32),extra_x:usize,extra_y:usize,fill:bool){
         let (sw,sh)=(screen.0 as f32,screen.1 as f32);
         let (ww,wh)=((240+extra_x*2) as f32,(160+extra_y*2) as f32);
@@ -66,12 +75,14 @@ impl Engine {
         }
         let scale=if fill{(sw/ww).max(sh/wh)}else{(sw/ww).min(sh/wh)};
         let (width,height)=((ww*scale) as i32,(wh*scale) as i32);
-        self.world_rect=[((screen.0 as i32-width)/2) as f32,((screen.1 as i32-height)/2) as f32,width as f32,height as f32];
+        // A shifted texture row r shows rendered row r + view_shift; map taps to the rendered row.
+        let shift=self.view_shift as f32*height as f32/wh;
+        self.world_rect=[((screen.0 as i32-width)/2) as f32,((screen.1 as i32-height)/2) as f32-shift,width as f32,height as f32];
     }
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,expanded:false,padded:false,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,expanded:false,padded:false,world_map:Default::default(),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -142,6 +153,9 @@ impl Engine {
         self.collect_compilation();
         mem::set_extra(extra_x);
         mem::set_extra_y(extra_y);
+        // Portrait views tall enough for the whole world map (352 rows) keep the map
+        // still and pin its HUD to the edges; shorter views keep the game camera.
+        self.machine.bus.world_hud.enabled=extra_x<=8 && 160+2*extra_y>=360;
         self.audio.clear();
         self.pcm.begin(count.clamp(1,8),mode,
             self.cache_dir.as_deref().unwrap_or(&std::env::temp_dir()))?;
@@ -187,7 +201,8 @@ impl Engine {
         self.pixels.resize(size, 0);
         let expanded_rows=mem::extra_y()>0 && (self.machine.bus.ffta_movement.enabled || self.machine.bus.ffta_stage.enabled)
             && (0..4).any(|bg|gba_core::ppu::ffta_terrain(&self.machine.bus,bg)
-                || gba_core::ffta_stage::layer(&self.machine.bus,bg).is_some());
+                || gba_core::ffta_stage::layer(&self.machine.bus,bg).is_some()
+                || (self.machine.bus.world_hud.enabled && gba_core::ppu::ffta_world_map(&self.machine.bus,bg)));
         let padded=mem::extra_y()>0 && !expanded_rows;
         self.expanded=expanded_rows;
         self.padded=padded;
@@ -199,6 +214,19 @@ impl Engine {
         let colors=rgba_colors();
         for (out,&pixel) in self.pixels[offset..].iter_mut().zip(source){
             *out=colors[(pixel&0x7fff) as usize];
+        }
+        // world_rect still carries the shift of the frame it was set for.
+        let rect=self.texture_rect();
+        self.view_shift=0;
+        if expanded_rows && self.machine.bus.world_hud.map_frame {
+            let rh=mem::render_height() as f32;
+            let s=rect[3]/rh;
+            let dock=match self.ui_dock {
+                Some((top,bottom)) if s>0. => (((top-rect[1])/s).ceil() as i32,((bottom-rect[1])/s).floor() as i32),
+                _ => (0,rh as i32),
+            };
+            self.world_map.present(&self.machine.bus,&mut self.pixels,dock);
+            self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
         }
         self.frame_ns = start.elapsed().as_nanos() as u64;
         if self.adaptive && self.machine.bus.frames % 120 < count as u64 { self.start_compilation(); }

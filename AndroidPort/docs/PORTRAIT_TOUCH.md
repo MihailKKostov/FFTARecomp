@@ -41,6 +41,29 @@ repository root is not changed; only `AndroidPort/` is.
   (`title_touch.rs`, RAM addresses documented there). Measured: tapping
   Saved Game opens the Resume Battle / Load menu.
 
+## Done (0.28-android-preview)
+
+- **Portrait shop** (`touch::pieces`, `Layout::split`): town/site canvases are
+  split at empty rows/columns; the trader text stays docked on top, the main
+  lower block (Buy/Sell/Leave) sits lower right with an 8% inset at 80% of the
+  frame, smaller blocks (Clan Funds) in the bottom right corner. Shop list
+  canvases align with the native picture (their values show through holes).
+- **Portrait world map** (`world_map.rs`, gba-core `world_hud.rs`), only when
+  the view is at least 360 rows tall:
+  - BG0/BG1 are 256x512; the map (rows 0..352) is rendered beyond the native
+    rows and the texture is shifted so it stays still while BG0VOFS scrolls.
+  - The game culls town objects near its camera. 32x32 priority-2 objects
+    stable for 30 frames are remembered (decoded pixels) and drawn while
+    culled; forgotten after 20 frames missing inside the native view.
+  - HUD (BG2/BG3 + priority-0 tiles 40-4b and 5e-71) is lifted out of the
+    picture and pinned under the top safe area/bar and above the gamepad or
+    bottom inset. While BG2/BG3 draw between rows 32-128 (town menus), the HUD
+    stays in the picture so translucent menus compose as usual.
+  - Host sprite copies are not drawn in the extended rows (stale positions).
+  - World taps accept any map row (Y 22-330), so towns off the native screen
+    can be tapped; measured: a tap on the culled flower town sends Marche.
+  - Landscape: 2131-frame world map session hash-identical before/after.
+
 ## Measured with the headless runner (USA ROM, new game, 1080x2400)
 
 - Opening scene and the snowball-fight battle render the extended map above
@@ -60,7 +83,8 @@ repository root is not changed; only `AndroidPort/` is.
 
 1. Tap adapters for the Resume Battle / Load menu and save slots, then other
    unsupported screens (needs the user's save).
-2. World map in portrait: extend the map vertically like battles (needs a save).
+2. Status/party/equipment screens: per-screen portrait recipes (header on top,
+   panels stacked and enlarged); town menu on the world map in thumb reach.
 3. Drag on the battle map pans the game's camera instead of moving the cursor
    (needs the camera variables reverse-engineered).
 4. World map and towns: extend or frame them for portrait.
