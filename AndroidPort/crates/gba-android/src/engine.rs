@@ -19,7 +19,7 @@ pub struct Engine {
     extensions: Vec<NativeCode>,
     pending: Option<std::sync::mpsc::Receiver<Result<NativeCode,String>>>,
     missed: BTreeSet<u32>,
-    adaptive: bool,
+    pub adaptive: bool,
     pub pixels: Vec<i32>,
     pub audio: Vec<i16>,
     pcm: crate::audio::Audio,
@@ -28,6 +28,8 @@ pub struct Engine {
     pub frame_ns: u64,
     pub prepare_ms: u64,
     pub save_path: Option<PathBuf>,
+    /// Fast forward draws only the last frame of each batch.
+    pub skip_hidden_frames: bool,
     pub cache_dir: Option<PathBuf>,
     pub cache_hit: bool,
     rom_cache_key: String,
@@ -47,7 +49,7 @@ impl Engine {
         Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
-            fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, cache_dir: None, cache_hit: false,
+            fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
             rom_cache_key }
     }
     pub fn prepare(&mut self) -> Result<(), String> {
@@ -118,8 +120,10 @@ impl Engine {
         self.audio.clear();
         self.pcm.begin(count.clamp(1,8),mode,
             self.cache_dir.as_deref().unwrap_or(&std::env::temp_dir()))?;
-        for _ in 0..count.clamp(1, 8) {
+        let count=count.clamp(1,8);
+        for index in 0..count {
             let m = &mut *self.machine;
+            m.bus.skip_render=self.skip_hidden_frames && index+1<count;
             let keys=self.mouse.keys(&mut m.bus,(KEYS.load(Ordering::Relaxed) as u16)&0x3ff);
             m.bus.keys = gba_core::ffta_battle_mouse::keys(&mut m.bus,keys);
             m.bus.frame_ready = false;

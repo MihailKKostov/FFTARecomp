@@ -216,6 +216,9 @@ pub struct MemMap {
     vphase: VPhase,
     /// Set when a frame completes (start of VBlank); cleared by the runner.
     pub frame_ready: bool,
+    /// Host-only: the frame will not be presented, so skip drawing it. Emulated
+    /// state (HBlank DMA, IRQs, affine latches at line 0) is unaffected.
+    pub skip_render: bool,
     pub frames: u64,
 
     /// 240×160 RGB555 output, written per scanline by the PPU.
@@ -351,6 +354,7 @@ impl MemMap {
             vline_start: 0,
             vphase: VPhase::Hblank,
             frame_ready: false,
+            skip_render: false,
             frames: 0,
             framebuffer: vec![0; VISIBLE_WIDTH * VISIBLE_SCANLINES as usize],
             wide_framebuffer: vec![0; MAX_RENDER_WIDTH * MAX_RENDER_HEIGHT],
@@ -681,7 +685,9 @@ impl MemMap {
             VPhase::Hblank => {
                 let line = self.scanline();
                 if line < VISIBLE_SCANLINES {
-                    crate::ppu::render_scanline(self, line as usize);
+                    if !self.skip_render {
+                        crate::ppu::render_scanline(self, line as usize);
+                    }
                     self.trigger_dma(2); // HBlank timing (visible lines only)
                 }
                 if self.io[(DISPSTAT & 0x3FF) as usize] & 0x10 != 0 {
@@ -700,7 +706,9 @@ impl MemMap {
                     self.raise_irq(irq::VCOUNT);
                 }
                 if line == VISIBLE_SCANLINES {
-                    crate::ppu::render_ffta_zoom_rows(self);
+                    if !self.skip_render {
+                        crate::ppu::render_ffta_zoom_rows(self);
+                    }
                     self.frame_ready = true;
                     self.frames += 1;
                     if self.frames % 30 == 0 {

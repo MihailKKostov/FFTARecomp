@@ -5,18 +5,24 @@
 //!   cargo run --release -p gba-android --example headless -- \
 //!       --rom ffta.gba [--sav ffta.sav] --script input.txt --out shots \
 //!       [--screen 1080x2400] [--zoom 0] [--touch] [--frames N] [--save-out out.sav]
+//!       [--speed N] [--no-skip] [--hashes hashes.txt]
+//!
+//! --speed runs N frames per engine call like fast forward (events and shots
+//! land on batch boundaries); --no-skip draws hidden frames too; --hashes
+//! writes one presented-frame hash per batch for comparing runs.
 //!
 //! Script lines (frame numbers are absolute, '#' starts a comment):
 //!   press <frame> <BUTTON[+BUTTON...]> [frames=6]   BUTTON: A B SELECT START RIGHT LEFT UP DOWN R L
 //!   tap <frame> <x> <y> [back]                       x/y as 0..1 fractions of the screen
 //!   shot <frame> <name>
+//!   speed <frame> <N>                                frames per engine call from then on (1-8)
 //!   end <frame>
 use gba_android::engine::{Engine, KEYS};
 use std::{path::PathBuf, sync::atomic::Ordering};
 
 const BUTTONS: [&str; 10] = ["A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L"];
 
-enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String) }
+enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String), Speed(u64) }
 
 struct View { extra_x: usize, extra_y: usize, base_width: f32 }
 
@@ -60,6 +66,7 @@ fn parse_script(text: &str) -> Result<(Vec<(u64, Event)>, Option<u64>), String> 
                 events.push((frame, Event::Tap(x, y, parts.get(4) == Some(&"back"))));
             }
             "shot" => events.push((frame, Event::Shot(parts.get(2).ok_or_else(error)?.to_string()))),
+            "speed" => events.push((frame, Event::Speed(parts.get(2).and_then(|v| v.parse::<u64>().ok()).ok_or_else(error)?.clamp(1, 8)))),
             "end" => end = Some(frame),
             _ => return Err(error()),
         }
@@ -172,6 +179,7 @@ fn main() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let (mut rom, mut sav, mut script, mut out, mut save_out) = (None, None, None, PathBuf::from("shots"), None);
     let (mut screen, mut zoom, mut touch, mut frames) = ((2400u32, 1080u32), 0, false, None);
+    let (mut speed, mut skip, mut hashes) = (1u64, true, None);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -188,6 +196,9 @@ fn main() -> Result<(), String> {
             "--zoom" => zoom = value()?.parse().map_err(|_| "bad zoom")?,
             "--frames" => frames = Some(value()?.parse::<u64>().map_err(|_| "bad frame count")?),
             "--touch" => touch = true,
+            "--speed" => speed = value()?.parse::<u64>().map_err(|_| "bad speed")?.clamp(1, 8),
+            "--no-skip" => skip = false,
+            "--hashes" => hashes = Some(PathBuf::from(value()?)),
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
@@ -202,7 +213,15 @@ fn main() -> Result<(), String> {
     let mut engine = Engine::new(rom);
     if let Some(path) = &sav { engine.machine.bus.load_save_data(&std::fs::read(path).map_err(|e| format!("read save: {e}"))?); }
     engine.save_path = save_out;
-    if std::env::var_os("FFTA_ANDROID_TCC_LIBRARY").is_some() { engine.prepare()?; }
+    engine.skip_hidden_frames = skip;
+    let mut hash_log = String::new();
+    let mut frame_ns = 0u64;
+    if std::env::var_os("FFTA_ANDROID_TCC_LIBRARY").is_some() {
+        // Like the APK: compile boot code, then missed blocks in the background.
+        engine.adaptive = true;
+        engine.cache_dir = Some(std::env::temp_dir().join("ffta-headless-cache"));
+        engine.prepare()?;
+    }
     let view = device_view(screen, zoom);
     engine.configure_touch(touch, view.base_width, 1., 1.);
     engine.ui_window = screen;
@@ -213,20 +232,33 @@ fn main() -> Result<(), String> {
     let mut held: Vec<(u16, u64)> = Vec::new();
     let mut next = 0;
     let started = std::time::Instant::now();
-    for frame in 0..last {
+    let mut frame = 0;
+    while frame < last {
         let mut shots = Vec::new();
+        // A speed change applies from the batch that starts at or after its frame.
         while next < events.len() && events[next].0 <= frame {
-            match &events[next].1 {
+            if let Event::Speed(n) = events[next].1 { speed = n; }
+            next += 1;
+        }
+        let mut pending = next;
+        while pending < events.len() && events[pending].0 < frame + speed && !matches!(events[pending].1, Event::Speed(_)) { pending += 1; }
+        for index in std::mem::replace(&mut next, pending)..pending {
+            match &events[index].1 {
                 Event::Press(mask, duration) => held.push((*mask, frame + duration)),
                 Event::Tap(x, y, back) => engine.tap(*x, *y, *back),
                 Event::Shot(name) => shots.push(name.clone()),
+                Event::Speed(_) => {}
             }
-            next += 1;
         }
         held.retain(|h| h.1 > frame);
         let pressed = held.iter().fold(0u16, |m, h| m | h.0);
         KEYS.store((!pressed & 0x3ff) as u32, Ordering::Relaxed);
-        engine.frame(1, view.extra_x, view.extra_y, false)?;
+        engine.frame(speed as usize, view.extra_x, view.extra_y, false)?;
+        frame_ns += engine.frame_ns;
+        if hashes.is_some() {
+            let hash = engine.pixels.iter().fold(0xcbf29ce484222325u64, |h, p| (h ^ *p as u32 as u64).wrapping_mul(0x100000001b3));
+            hash_log += &format!("{} {hash:016x} {}\n", frame + speed - 1, engine.frame_ns);
+        }
         for name in shots {
             let path = out.join(format!("{name}.png"));
             write_png(&path, screen.0, screen.1, &compose(&engine, &view, screen)).map_err(|e| e.to_string())?;
@@ -247,8 +279,11 @@ fn main() -> Result<(), String> {
             }
             println!("frame {frame}: {}", path.display());
         }
+        frame += speed;
     }
     engine.save()?;
+    if let Some(path) = &hashes { std::fs::write(path, hash_log).map_err(|e| e.to_string())?; }
+    eprintln!("engine time {:.2} ms per emulated frame (speed {speed}, skip {skip})", frame_ns as f64 / 1e6 / last as f64);
     eprintln!("{last} frames in {:.1}s ({} native dispatches, {} interpreted instructions)",
         started.elapsed().as_secs_f64(), engine.native_blocks, engine.fallback_steps);
     Ok(())
