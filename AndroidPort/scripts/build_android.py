@@ -1,7 +1,7 @@
 """Build Android ARM64 Rust + separately loaded TinyCC, then package the APK.
 
-Windows host: Android SDK/NDK, Rust aarch64-linux-android, Java, and a host
-C compiler (gcc/clang) are required. All downloaded/generated code stays in target.
+Windows or Linux host: Android SDK/NDK, Rust aarch64-linux-android, Java, and a
+host C compiler (gcc/clang) are required. All downloaded/generated code stays in target.
 """
 from pathlib import Path
 import argparse
@@ -10,12 +10,16 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REV = '43c7708b85681a2fd4451c8a541af4494a8919b2'
 ARCHIVE_SHA256 = 'f660447b16d6e0efe27ba8a9122aa45ee950f84b574eeb8dd1e86bc8ad34c0ea'
+WINDOWS = sys.platform == 'win32'
+# The same pinned archive ships with the desktop project; used when the download is unavailable.
+LOCAL_ARCHIVE = ROOT.parent / 'TinyCC/source.zip'
 
 
 def run(args, **kwargs):
@@ -25,7 +29,8 @@ def run(args, **kwargs):
 def build(sdk, ndk, native_only=False):
     sdk = Path(sdk).resolve()
     ndk_root = sdk / 'ndk' / ndk
-    bin_dir = ndk_root / 'toolchains/llvm/prebuilt/windows-x86_64/bin'
+    host = 'windows-x86_64' if WINDOWS else 'darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64'
+    bin_dir = ndk_root / 'toolchains/llvm/prebuilt' / host / 'bin'
     if not bin_dir.is_dir():
         raise RuntimeError(f'NDK toolchain not found: {bin_dir}')
     cache = ROOT / 'target/android-tcc'
@@ -33,8 +38,14 @@ def build(sdk, ndk, native_only=False):
     archive = cache / 'source.zip'
     if not archive.exists():
         print(f'Downloading TinyCC {REV}', flush=True)
-        archive.write_bytes(urllib.request.urlopen(
-            f'https://codeload.github.com/TinyCC/tinycc/zip/{REV}', timeout=60).read())
+        try:
+            archive.write_bytes(urllib.request.urlopen(
+                f'https://codeload.github.com/TinyCC/tinycc/zip/{REV}', timeout=60).read())
+        except OSError:
+            if not LOCAL_ARCHIVE.is_file():
+                raise
+            print(f'Download failed; using {LOCAL_ARCHIVE}', flush=True)
+            shutil.copy2(LOCAL_ARCHIVE, archive)
     data = archive.read_bytes()
     if hashlib.sha256(data).hexdigest() != ARCHIVE_SHA256:
         raise RuntimeError('TinyCC archive checksum mismatch; refusing to compile')
@@ -60,15 +71,17 @@ def build(sdk, ndk, native_only=False):
     host_cc = shutil.which('gcc') or shutil.which('clang')
     if not host_cc:
         raise RuntimeError('A host gcc or clang is required to build TinyCC c2str')
-    run([host_cc, '-DC2STR', source / 'conftest.c', '-o', cache / 'c2str.exe'])
-    run([cache / 'c2str.exe', source / 'include/tccdefs.h', source / 'tccdefs_.h'])
+    c2str = cache / ('c2str.exe' if WINDOWS else 'c2str')
+    run([host_cc, '-DC2STR', source / 'conftest.c', '-o', c2str])
+    run([c2str, source / 'include/tccdefs.h', source / 'tccdefs_.h'])
     libraries = ROOT / 'android/app/src/main/jniLibs/arm64-v8a'
     libraries.mkdir(parents=True, exist_ok=True)
-    run([bin_dir / 'clang.exe', '--target=aarch64-linux-android24', '-shared', '-fPIC', '-O2',
+    run([bin_dir / ('clang.exe' if WINDOWS else 'clang'), '--target=aarch64-linux-android24', '-shared', '-fPIC', '-O2',
          '-Wl,-z,max-page-size=16384', '-Wl,-soname,libtcc.so', '-o', libraries / 'libtcc.so',
          source / 'libtcc.c', '-ldl', '-lm'])
     env = os.environ.copy()
-    env['CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER'] = str(bin_dir / 'aarch64-linux-android24-clang.cmd')
+    env['CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER'] = str(
+        bin_dir / ('aarch64-linux-android24-clang.cmd' if WINDOWS else 'aarch64-linux-android24-clang'))
     run(['cargo', 'build', '--release', '--locked', '-p', 'gba-android',
          '--target', 'aarch64-linux-android'], env=env)
     native = ROOT / 'target/aarch64-linux-android/release/libgba_android.so'
@@ -91,7 +104,8 @@ def build(sdk, ndk, native_only=False):
     if native_only:
         return
     (ROOT / 'android/local.properties').write_text('sdk.dir=' + str(sdk).replace('\\', '/') + '\n')
-    run([ROOT / 'android/gradlew.bat', '-p', ROOT / 'android', ':app:assembleDebug',
+    gradlew = ROOT / ('android/gradlew.bat' if WINDOWS else 'android/gradlew')
+    run(([gradlew] if WINDOWS else ['sh', gradlew]) + ['-p', ROOT / 'android', ':app:assembleDebug',
          ':app:testDebugUnitTest', '--console=plain'], env=env)
     apk = ROOT / 'android/app/build/outputs/apk/debug/app-debug.apk'
     destination = ROOT / 'APK/FFTARecomp-android-arm64-preview.apk'
