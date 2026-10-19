@@ -1,9 +1,9 @@
 //! Shared semantic click targets, with Android screen-space UI composition.
 use gba_core::{ffta_battle_mouse as battle, ffta_dialogue::{self as dialogue,PanelKind}, mem::{self,MemMap}};
-use crate::{engine::Engine,ui_layout::{Band,Layout}};
+use crate::{engine::Engine,ui_layout::{Band,Dock,Layout}};
 
 /// Up to this many clipped pieces are exported per frame (GameSurface slots).
-pub const UI_SLOTS:usize=4;
+pub const UI_SLOTS:usize=8;
 
 /// Visible blocks of a native UI canvas: row clusters split at empty rows,
 /// then each split at empty columns. Native coordinates (x relative to the
@@ -22,56 +22,55 @@ fn row_clusters(pixels:&[dialogue::UiPixel])->Vec<(usize,usize)>{
     clusters
 }
 
-pub fn canvas_regions(pixels:&[dialogue::UiPixel])->(Vec<[i32;4]>,usize){
+/// Visible blocks of a native UI canvas: row clusters split at empty columns.
+/// Native coordinates (x relative to the 240-wide screen), with each block's
+/// row cluster.
+pub fn canvas_blocks(pixels:&[dialogue::UiPixel])->Vec<([i32;4],(usize,usize))>{
     let width=dialogue::LAYER_WIDTH;
-    let clusters=row_clusters(pixels);
-    let mut regions=Vec::new();let mut top=0;
-    for (index,&(y0,y1)) in clusters.iter().enumerate() {
+    let mut blocks=Vec::new();
+    for (y0,y1) in row_clusters(pixels) {
         let column=|x:usize|(y0..y1).any(|y|pixels[y*width+x].visible());
         let mut x=0;
         while x<width {
             if !column(x){x+=1;continue;}
             let start=x;let mut end=x+1;let mut gap=0;x+=1;
             while x<width&&gap<8 {if column(x){end=x+1;gap=0}else{gap+=1}x+=1;}
-            regions.push([start as i32-dialogue::LAYER_INSET,y0 as i32,end as i32-dialogue::LAYER_INSET,y1 as i32]);
-            if index==0&&y0<40 {top+=1;}
+            blocks.push(([start as i32-dialogue::LAYER_INSET,y0 as i32,end as i32-dialogue::LAYER_INSET,y1 as i32],(y0,y1)));
         }
     }
-    (regions,top)
+    blocks
 }
 
-/// Screen pieces of UI layer `index`. Portrait battle-style scenes split town,
-/// shop and site canvases so the speaker stays on top and the choices sit in
-/// the right thumb's reach; everything else is one piece.
-/// `world` is the screen rectangle of the native 240x160 picture inside the world texture.
-pub fn pieces(bus:&MemMap,band:Band,world:Band,index:usize)->Vec<Layout>{
+/// Where a block of the main canvas goes in a portrait docking frame. Decided
+/// only by its native position, never by scene classification or its current
+/// size, so opening animations and late classification cannot make it jump.
+fn dock_for(state:&dialogue::DialogueState,clusters:usize,block:[i32;4],(y0,y1):(usize,usize))->Dock{
+    if state.shop_layout {
+        // Shop lists sit at the bottom; a separate trader reply stays on top.
+        return if clusters>1 && y0<8 && y1-y0<=72 {Dock::Top} else {Dock::Bottom};
+    }
+    if y0<8 {Dock::Top}
+    else if block[2]<=120 && block[2]-block[0]<=128 {Dock::Thumb}
+    else {Dock::Bottom}
+}
+
+/// Screen pieces of UI layer `index`. In portrait battle-style scenes the main
+/// canvas is cut into blocks placed by `dock_for`; town menus drawn on the
+/// extra layer use the same thumb placement. Everything else is one piece.
+pub fn pieces(bus:&MemMap,band:Band,index:usize)->Vec<Layout>{
     let state=&bus.ffta_dialogue;
     let docked=band.h>160.*band.s+0.5;
-    if index==0 && docked && (state.town_layout||state.site_layout) && !state.shop_layout && state.layer().is_some() {
-        let (regions,top)=canvas_regions(&state.pixels);
-        if regions.len()>1 && regions.len()<=UI_SLOTS {return Layout::split(band,state.style.scale,&regions,top);}
+    if docked && index==0 && !state.action_layout && state.layer().is_some() {
+        let blocks=canvas_blocks(&state.pixels);
+        let clusters=row_clusters(&state.pixels).len();
+        let placed:Vec<_>=blocks.iter().map(|&(b,c)|(b,dock_for(state,clusters,b,c))).collect();
+        if !placed.is_empty() {return Layout::docked(band,state.style.scale,&placed);}
     }
-    // Shop lists (their stat digits are captured with the canvas, see ppu.rs
-    // shop_numeral) dock to the bottom so the shop artwork above stays visible;
-    // a separate dialogue-sized block at the top (the trader's reply) stays on top.
-    if index==0 && docked && state.shop_layout {
-        if let Some(bounds)=dialogue::pixel_bounds(&state.pixels) {
-            let clusters=row_clusters(&state.pixels);
-            let header=clusters.first().filter(|&&(y0,y1)|clusters.len()>1 && y0<8 && y1-y0<=72).copied();
-            let Some((_,header_end))=header else {
-                return vec![Layout::at_corner(band,false,true,state.style.scale,state.style.length,bounds)];
-            };
-            let rest_top=clusters[1].0 as i32;
-            let head=Layout::split(band,state.style.scale,&[[bounds[0],0,bounds[2],header_end as i32]],1);
-            let rest=[bounds[0],rest_top,bounds[2],bounds[3]];
-            let mut lower=Layout::at_corner(band,false,true,state.style.scale,state.style.length,rest);
-            let k=lower.rect[3]/160.;
-            lower.clip=[lower.rect[0]+(rest[0]+120) as f32*k,lower.rect[1]+rest[1] as f32*k,
-                (rest[2]-rest[0]) as f32*k,(rest[3]-rest[1]) as f32*k];
-            return head.into_iter().chain([lower]).collect();
+    if docked && index==1 && state.town_layout && state.extra.kind==PanelKind::Actions && state.extra.active() {
+        if let Some(b)=dialogue::pixel_bounds(&state.extra.pixels) {
+            return Layout::docked(band,state.style.scale,&[(b,Dock::Thumb)]);
         }
     }
-    let _=world;
     layout(bus,band,index).into_iter().collect()
 }
 
@@ -167,7 +166,7 @@ impl Engine {
         let mut handled=false;
         if (battle::MenuScene::read(&self.machine.bus).is_some()||state.shop_layout)&&index.is_some(){
             let i=index.unwrap();
-            if let Some(source)=pieces(&self.machine.bus,band,self.world_band(),i).iter().find_map(|l|l.source(px,py)){
+            if let Some(source)=pieces(&self.machine.bus,band,i).iter().find_map(|l|l.source(px,py)){
                 let mut nx=(source%480) as f32-120.;let ny=(source/480) as f32;
                 if !(state.town_layout||state.shop_layout||state.site_layout||state.extra.kind==PanelKind::Notice){
                     let bounds=if i==0{dialogue::panel_bounds(&state.pixels,&state.backing)}else{dialogue::panel_bounds(&state.extra.pixels,&state.extra.backing)};
@@ -202,7 +201,7 @@ impl Engine {
         let band=self.ui_band();
         let mut slot=0;
         for i in 0..2 {
-            let layouts=pieces(&self.machine.bus,band,self.world_band(),i);
+            let layouts=pieces(&self.machine.bus,band,i);
             if layouts.is_empty(){continue;}
             let state=&self.machine.bus.ffta_dialogue;
             let pixels=if i==0{&state.pixels}else{&state.extra.pixels};

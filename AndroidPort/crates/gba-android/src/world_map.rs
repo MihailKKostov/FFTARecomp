@@ -10,10 +10,23 @@ use gba_core::{mem::{self, MemMap}, world_hud::TRANSPARENT};
 const MAP_CENTER: i32 = 176;
 const STABLE_FRAMES: u16 = 30;
 const MISSING_FRAMES: u16 = 20;
-/// Map margins: a dark tone instead of the flat blue backdrop.
-const MARGIN: i32 = 0xff14231cu32 as i32;
 
-struct Town { x: i32, y: i32, key: u16, pixels: Vec<i32>, stable: u16, missing: u16, seen: bool }
+/// Remembered as palette indices so palette fades apply when it is drawn.
+struct Town { x: i32, y: i32, key: u16, indices: Vec<u8>, stable: u16, missing: u16, seen: bool }
+
+/// The GBA brightness effect (BLDCNT mode 2/3) for a first-target layer bit.
+fn faded(bus: &MemMap, color: u16, target: u16) -> u16 {
+    let control = half(&bus.io, 0x50);
+    let mode = (control >> 6) & 3;
+    if !matches!(mode, 2 | 3) || control & target == 0 { return color; }
+    let evy = (half(&bus.io, 0x54) & 31).min(16) as u32;
+    let channel = |shift: u16| {
+        let c = ((color >> shift) & 31) as u32;
+        let c = if mode == 2 { c + (31 - c) * evy / 16 } else { c - c * evy / 16 };
+        (c as u16) << shift
+    };
+    channel(0) | channel(5) | channel(10)
+}
 
 #[derive(Default)]
 pub struct WorldMap { towns: Vec<Town> }
@@ -25,9 +38,8 @@ fn town_object(a0: u16, a1: u16, a2: u16) -> bool {
     a0 & 0x300 == 0 && a0 >> 14 == 0 && a1 >> 14 == 2 && (a2 >> 10) & 3 == 2
 }
 
-/// Decoded 32x32 object pixels (ARGB, 0 = transparent) from VRAM and OBJ palette.
-fn decode(bus: &MemMap, a0: u16, a1: u16, a2: u16) -> Vec<i32> {
-    let colors = crate::engine::rgba_colors();
+/// 32x32 object pixels as OBJ palette entries (0 = transparent), from VRAM.
+fn decode(bus: &MemMap, a0: u16, a1: u16, a2: u16) -> Vec<u8> {
     let one_d = half(&bus.io, 0) & 0x40 != 0;
     let bpp8 = a0 & 0x2000 != 0;
     let (tile, palette) = ((a2 & 1023) as usize, (a2 >> 12) as usize);
@@ -40,15 +52,12 @@ fn decode(bus: &MemMap, a0: u16, a1: u16, a2: u16) -> Vec<i32> {
             let step = if bpp8 { 2 } else { 1 };
             let index = if one_d { tile + (ty * 4 + tx) * step } else { tile + ty * 32 + tx * step };
             let base = 0x10000 + (index & 1023) * 32;
-            let color = if bpp8 {
-                let i = bus.vram.get(base + (sy % 8) * 8 + sx % 8).copied().unwrap_or(0) as usize;
-                (i != 0).then(|| half(&bus.palette, 0x200 + i * 2))
+            out[y * 32 + x] = if bpp8 {
+                bus.vram.get(base + (sy % 8) * 8 + sx % 8).copied().unwrap_or(0)
             } else {
                 let byte = bus.vram.get(base + (sy % 8) * 4 + (sx % 8) / 2).copied().unwrap_or(0);
-                let i = ((byte >> (4 * (sx % 2))) & 15) as usize;
-                (i != 0).then(|| half(&bus.palette, 0x200 + palette * 32 + i * 2))
+                match (byte >> (4 * (sx % 2))) & 15 { 0 => 0, i => (palette * 16) as u8 | i }
             };
-            if let Some(c) = color { out[y * 32 + x] = colors[(c & 0x7fff) as usize]; }
         }
     }
     out
@@ -74,9 +83,9 @@ impl WorldMap {
             if let Some(town) = self.towns.iter_mut().find(|t| t.x == x && t.y == y && t.key == a2) {
                 town.seen = true; town.missing = 0;
                 town.stable = town.stable.saturating_add(1);
-                if town.stable == STABLE_FRAMES { town.pixels = decode(bus, a0, a1, a2); }
+                if town.stable == STABLE_FRAMES { town.indices = decode(bus, a0, a1, a2); }
             } else if self.towns.len() < 64 {
-                self.towns.push(Town { x, y, key: a2, pixels: Vec::new(), stable: 1, missing: 0, seen: true });
+                self.towns.push(Town { x, y, key: a2, indices: Vec::new(), stable: 1, missing: 0, seen: true });
             }
         }
         // A remembered object that is missing while fully inside the native view is gone.
@@ -98,34 +107,41 @@ impl WorldMap {
         let shift = Self::shift(bus);
         self.remember_towns(bus, vofs);
         let colors = crate::engine::rgba_colors();
-        let backdrop = colors[(half(&bus.palette, 0) & 0x7fff) as usize];
-        let mut out = vec![MARGIN; rw * rh];
+        let backdrop_color = half(&bus.palette, 0) & 0x7fff;
+        let backdrop = colors[backdrop_color as usize];
+        // Margins: a deep shade of the game's own backdrop, so fades reach them too.
+        let margin = {
+            let c = colors[faded(bus, backdrop_color, 0x20) as usize] as u32;
+            let shade = |shift: u32| (((c >> shift) & 255) * 3 / 20) << shift;
+            (0xff000000 | shade(16) | shade(8) | shade(0)) as i32
+        };
+        let mut out = vec![margin; rw * rh];
         for r in 0..rh as i32 {
             let src = r + shift;
             if !(0..rh as i32).contains(&src) { continue; }
             let (o, s) = (r as usize * rw, src as usize * rw);
             for (target, &pixel) in out[o..o + rw].iter_mut().zip(&pixels[s..s + rw]) {
-                *target = if pixel == backdrop { MARGIN } else { pixel };
+                *target = if pixel == backdrop { margin } else { pixel };
             }
         }
         // Absolute map row a is displayed at row a - first.
         let first = vofs - ey + shift;
         // Culled towns are drawn whole; towns the game still shows only get the
         // rows outside its native view, which it cannot draw.
-        for town in self.towns.iter().filter(|t| !t.pixels.is_empty()) {
-            for (i, &p) in town.pixels.iter().enumerate() {
+        for town in self.towns.iter().filter(|t| !t.indices.is_empty()) {
+            for (i, &index) in town.indices.iter().enumerate() {
                 let row = town.y + (i / 32) as i32;
-                if p == 0 || (town.seen && (vofs..vofs + 160).contains(&row)) { continue; }
+                if index == 0 || (town.seen && (vofs..vofs + 160).contains(&row)) { continue; }
                 let (x, y) = (town.x + ex + (i % 32) as i32, row - first);
-                if (0..rw as i32).contains(&x) && (0..rh as i32).contains(&y) { out[y as usize * rw + x as usize] = p; }
+                let color = faded(bus, half(&bus.palette, 0x200 + index as usize * 2) & 0x7fff, 0x10);
+                if (0..rw as i32).contains(&x) && (0..rh as i32).contains(&y) { out[y as usize * rw + x as usize] = colors[color as usize]; }
             }
         }
         // HUD: blocks touching the top or bottom of the native screen are pinned
         // to the docking frame; anything in between (town menus) stays with the map.
         let hud = &bus.world_hud.pixels;
         let row_used = |y: usize| hud[y * 240..(y + 1) * 240].iter().any(|&p| p != TRANSPARENT);
-        // While a menu is open the HUD stays in the picture (see world_hud.rs).
-        let mut y = if bus.world_hud.active { 0 } else { 160 };
+        let mut y = 0;
         while y < 160 {
             if !row_used(y) { y += 1; continue; }
             let start = y;
@@ -139,7 +155,7 @@ impl WorldMap {
                 if !(0..rh as i32).contains(&target) { continue; }
                 for x in 0..240 {
                     let p = hud[row * 240 + x];
-                    if p != TRANSPARENT { out[target as usize * rw + (x as i32 + ex) as usize] = colors[(p & 0x7fff) as usize]; }
+                    if p != TRANSPARENT { out[target as usize * rw + (x as i32 + ex) as usize] = colors[faded(bus, p & 0x7fff, 0x1c) as usize]; }
                 }
             }
         }
@@ -156,6 +172,16 @@ mod tests {
         assert!(!town_object(0x0030, 0x4068, 0x98d2));
         assert!(!town_object(0x0032, 0x8070, 0x01d6));
         assert!(!town_object(0x0230, 0x8068, 0x98d2));
+    }
+    #[test]
+    fn brightness_fades_reach_host_drawn_pixels_for_their_target_layers() {
+        let mut bus = MemMap::new(vec![]);
+        bus.io[0x50..0x52].copy_from_slice(&(0x00d0u16).to_le_bytes()); // darken, OBJ target
+        bus.io[0x54] = 16;
+        assert_eq!(faded(&bus, 0x7fff, 0x10), 0);
+        assert_eq!(faded(&bus, 0x7fff, 0x04), 0x7fff);
+        bus.io[0x54] = 8;
+        assert_eq!(faded(&bus, 0x001f, 0x10), 0x0010);
     }
     #[test]
     fn the_map_stays_still_while_the_game_camera_scrolls() {

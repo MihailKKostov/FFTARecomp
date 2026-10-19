@@ -5,9 +5,9 @@
 //! tiles 0x40-0x4b ("L Law", "R Info") and 0x5e-0x71 (the date label). When
 //! enabled, those pixels are moved out of the picture into `pixels` so the
 //! frontend can pin them to the screen edges while the map stays in place.
-//! Town menus and popups share BG2/BG3 and are translucent, so while the
-//! previous frame drew anything there between the HUD rows the HUD stays in
-//! the picture and the game composes menu and HUD as usual.
+//! Town menus and popups share BG2/BG3, so only BG pixels inside the measured
+//! HUD boxes are lifted; menus (and their opening animations) stay in the
+//! picture and compose as usual while the HUD remains pinned.
 use crate::mem::MemMap;
 
 pub const TRANSPARENT: u16 = 0xFFFF;
@@ -16,11 +16,9 @@ pub const TRANSPARENT: u16 = 0xFFFF;
 pub struct WorldHud {
     /// Requested by the frontend (portrait/square views only).
     pub enabled: bool,
-    /// The current frame is a tall world map frame (map presentation applies).
+    /// The current frame is a tall world map frame: the HUD is lifted out,
+    /// `pixels` is valid and the map presentation applies.
     pub map_frame: bool,
-    /// The HUD is lifted out this frame and `pixels` is valid.
-    pub active: bool,
-    menu_seen: bool,
     /// 240x160 RGB555 HUD picture, TRANSPARENT where empty.
     pub pixels: Vec<u16>,
     boxes: Vec<[i32; 4]>,
@@ -45,10 +43,8 @@ pub fn hud_object(a0: u16, a2: u16) -> bool {
 pub fn begin_frame(mem: &mut MemMap, world_map: bool) {
     let hud = &mut mem.world_hud;
     hud.map_frame = hud.enabled && world_map && crate::mem::extra_y() > 0;
-    hud.active = hud.map_frame && !hud.menu_seen;
-    hud.menu_seen = false;
     hud.boxes.clear();
-    if !hud.active { return; }
+    if !hud.map_frame { return; }
     hud.pixels.clear();
     hud.pixels.resize(240 * 160, TRANSPARENT);
     for entry in mem.oam.chunks_exact(8) {
@@ -64,9 +60,12 @@ pub fn begin_frame(mem: &mut MemMap, world_map: bool) {
     }
 }
 
-/// BG2/BG3 content between the HUD rows: a town menu or popup is open.
-pub fn note_menu_row(mem: &mut MemMap, line: usize, used: bool) {
-    if used && (32..128).contains(&line) { mem.world_hud.menu_seen = true; }
+/// Measured HUD blocks (native x0, y0, x1, y1): "L Law", "R Info", Clan Funds
+/// (room for more digits) and the date. BG2/BG3 pixels elsewhere are menus.
+const HUD_BOXES: [[i32; 4]; 4] = [[0, 0, 40, 26], [200, 0, 240, 26], [0, 132, 100, 160], [144, 140, 240, 160]];
+
+pub fn in_hud_box(x: i32, y: i32) -> bool {
+    HUD_BOXES.iter().any(|b| x >= b[0] && x < b[2] && y >= b[1] && y < b[3])
 }
 
 pub fn in_hud_object(mem: &MemMap, x: i32, y: i32) -> bool {

@@ -474,11 +474,6 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
     mem.aff_ref[3] = mem.aff_ref[3].wrapping_add(io16(mem, 0x36) as i16 as i32);
 
     if mem.world_hud.map_frame {
-        let ex=extra();
-        let used=(2..4).any(|bg|bg_used[bg] && bg_lines[bg][ex..ex+VISIBLE_WIDTH].iter().any(|&p|p!=TRANSPARENT));
-        crate::world_hud::note_menu_row(mem,line,used);
-    }
-    if mem.world_hud.active {
         // Tall world map views: lift the HUD out of the picture (see world_hud.rs).
         let ex=extra();
         // Static HUD layers have nothing to show in the side columns either.
@@ -489,7 +484,9 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
         for x in 0..VISIBLE_WIDTH {
             let wx=ex+x;
             let mut hud=crate::world_hud::TRANSPARENT;
+            let in_box=crate::world_hud::in_hud_box(x as i32,line as i32);
             for bg in [2,3] {
+                if !in_box {continue;}
                 if bg_used[bg] && bg_lines[bg][wx]!=TRANSPARENT {
                     if hud==crate::world_hud::TRANSPARENT {hud=bg_lines[bg][wx];}
                     bg_lines[bg][wx]=TRANSPARENT;

@@ -215,6 +215,7 @@ impl Engine {
         for (out,&pixel) in self.pixels[offset..].iter_mut().zip(source){
             *out=colors[(pixel&0x7fff) as usize];
         }
+        if padded { backdrop_grid(&mut self.pixels); }
         // world_rect still carries the shift of the frame it was set for.
         let rect=self.texture_rect();
         self.view_shift=0;
@@ -293,6 +294,29 @@ impl Engine {
             self.code.as_ref().map_or(0,|c|c.blocks.len()),self.native_blocks,self.fallback_steps,self.machine.bus.frames,
             self.frame_ns as f64/1e6,self.prepare_ms,mem::render_width(),mem::render_height(),self.machine.cpu.regs[15],self.cache_hit)
     }
+}
+/// Padded frames: GameSurface fills the bars with a blurred copy of the picture.
+/// Stretching 160 native rows across a tall screen shows each row as a stripe,
+/// so a 30x20 grid of 8x8 averages (plus a 1-texel clamped border) is written
+/// into the unused padding rows at texture (0,0)-(32,22) for it to sample.
+pub const BACKDROP_GRID:(usize,usize)=(30,20);
+fn backdrop_grid(pixels:&mut [i32]){
+    let (rw,ey,ex)=(mem::render_width(),mem::extra_y(),mem::extra());
+    let (gw,gh)=BACKDROP_GRID;
+    if ey<gh+2 || rw<gw+2 {return;}
+    let mut grid=vec![0i32;(gw+2)*(gh+2)];
+    for gy in 0..gh {for gx in 0..gw {
+        let mut sum=[0u32;3];
+        for dy in 0..8 {for dx in 0..8 {
+            let p=pixels[(ey+gy*8+dy)*rw+ex+gx*8+dx] as u32;
+            sum[0]+=(p>>16)&255;sum[1]+=(p>>8)&255;sum[2]+=p&255;
+        }}
+        grid[(gy+1)*(gw+2)+gx+1]=(0xff000000|(sum[0]/64)<<16|(sum[1]/64)<<8|sum[2]/64) as i32;
+    }}
+    for gy in 0..gh+2 {for gx in 0..gw+2 {
+        let (sy,sx)=(gy.clamp(1,gh),gx.clamp(1,gw));
+        pixels[gy*rw+gx]=grid[sy*(gw+2)+sx];
+    }}
 }
 pub(crate) fn rgba_colors()->&'static[i32]{
     static COLORS:std::sync::OnceLock<Box<[i32]>>=std::sync::OnceLock::new();

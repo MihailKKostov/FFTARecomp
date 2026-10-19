@@ -31,6 +31,7 @@ struct View { extra_x: usize, extra_y: usize, base_width: f32 }
 fn device_view(screen: (u32, u32), zoom: i32) -> View {
     let ratio = screen.0.max(1) as f64 / screen.1.max(1) as f64;
     let (width, height) = if ratio >= 1.5 { ((160. * ratio).max(242.).min(1536.), 160.) }
+        else if ratio < 1. { (240., (240. / ratio).min(800.)) }
         else { (256., (256. / ratio).min(800.)) };
     let limit = (1536. / width).min(800. / height);
     let max_zoom = ((limit.ln() / 2f64.powf(1. / 6.).ln()).floor() as i32).clamp(0, 6);
@@ -91,21 +92,22 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
     if padded {
         let aspect = sw as f32 / sh as f32;
         let (bw, bh) = if aspect < 1.5 { (240. * aspect / 1.5, 160.) } else { (240., 240. / aspect) };
-        let (ox, oy) = (view.extra_x as f32 + (240. - bw) / 2., view.extra_y as f32 + (160. - bh) / 2.);
+        // GameSurface samples the engine's 30x20 average grid at texel (1,1) with linear filtering.
+        let (gx0, gy0) = (1. + (30. - 30. * bw / 240.) / 2., 1. + (20. - 20. * bh / 160.) / 2.);
+        let texel = |x: usize, y: usize| engine.pixels[y.min(21) * ww + x.min(31)] as u32;
         for y in 0..sh {
             for x in 0..sw {
-                let (tx, ty) = (ox + (x as f32 + 0.5) / sw as f32 * bw, oy + (y as f32 + 0.5) / sh as f32 * bh);
-                let mut c = [0u32; 3];
-                for dy in [-4i32, 0, 4] {
-                    for dx in [-4i32, 0, 4] {
-                        let sx = (tx as i32 + dx).clamp(0, ww as i32 - 1) as usize;
-                        let syy = (ty as i32 + dy).clamp(0, wh as i32 - 1) as usize;
-                        let p = engine.pixels[syy * ww + sx] as u32;
-                        c[0] += (p >> 16) & 255; c[1] += (p >> 8) & 255; c[2] += p & 255;
-                    }
-                }
+                let gx = gx0 + (x as f32 + 0.5) / sw as f32 * 30. * bw / 240. - 0.5;
+                let gy = gy0 + (y as f32 + 0.5) / sh as f32 * 20. * bh / 160. - 0.5;
+                let (ix, iy) = (gx.floor().max(0.) as usize, gy.floor().max(0.) as usize);
+                let (fx, fy) = (gx - gx.floor(), gy - gy.floor());
                 let o = &mut out[(y * sw + x) * 3..][..3];
-                for i in 0..3 { o[i] = (c[i] as f32 / 9. * 0.34 + [3., 4.6, 4.][i]) as u8; }
+                for (i, shift) in [16u32, 8, 0].into_iter().enumerate() {
+                    let c = |px: usize, py: usize| ((texel(px, py) >> shift) & 255) as f32;
+                    let v = c(ix, iy) * (1. - fx) * (1. - fy) + c(ix + 1, iy) * fx * (1. - fy)
+                        + c(ix, iy + 1) * (1. - fx) * fy + c(ix + 1, iy + 1) * fx * fy;
+                    o[i] = (v * 0.34 + [3., 4.6, 4.][i]) as u8;
+                }
             }
         }
     }
@@ -130,7 +132,7 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
         }
     }
     let mut packed = vec![0u8; 480 * 160 * 4 * 2];
-    let mut params = [0f32; 40];
+    let mut params = [0f32; 8 * 9 + 4];
     let mut background = vec![0i32; ww * wh];
     engine.export_ui(&mut packed, &mut params, &mut background);
     if let Some(prefix) = std::env::var_os("FFTA_UI_DUMP") {
@@ -150,7 +152,7 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
             gba_core::ffta_dialogue::pixel_bounds(&state.pixels), gba_core::ffta_dialogue::pixel_bounds(&state.extra.pixels),
             state.extra.kind, state.action_layout, state.town_layout, state.shop_layout, state.site_layout, engine.expanded, engine.padded);
     }
-    for slot in 0..4 {
+    for slot in 0..8 {
         let p = &params[slot * 9..slot * 9 + 9];
         let layer = (p[8] as usize) % 2;
         if p[2] <= 0. { continue; }
@@ -344,6 +346,27 @@ fn main() -> Result<(), String> {
                         eprintln!("host x={} y={} a0={a0:04x} a1={a1:04x} a2={a2:04x} tile={:#x} prio={} slot={}",
                             h.x, h.y, a2 & 1023, (a2 >> 10) & 3, h.slot);
                     }
+                }
+                let hud = &engine.machine.bus.world_hud;
+                if hud.map_frame {
+                    // HUD blocks: 8x8 cells holding captured pixels, merged by flood fill.
+                    let mut cells = [[false; 30]; 20];
+                    for (i, &p) in hud.pixels.iter().enumerate() { if p != 0xffff { cells[i / 240 / 8][i % 240 / 8] = true; } }
+                    let mut seen = [[false; 30]; 20];
+                    for cy in 0..20 { for cx in 0..30 {
+                        if !cells[cy][cx] || seen[cy][cx] { continue; }
+                        let mut stack = vec![(cy, cx)]; let mut b = [cx, cy, cx, cy]; seen[cy][cx] = true;
+                        while let Some((y, x)) = stack.pop() {
+                            b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+                            for (dy, dx) in [(0i32, 1i32), (0, -1), (1, 0), (-1, 0)] {
+                                let (ny, nx) = (y as i32 + dy, x as i32 + dx);
+                                if (0..20).contains(&ny) && (0..30).contains(&nx) && cells[ny as usize][nx as usize] && !seen[ny as usize][nx as usize] {
+                                    seen[ny as usize][nx as usize] = true; stack.push((ny as usize, nx as usize));
+                                }
+                            }
+                        }
+                        eprintln!("hud block x {}..{} y {}..{}", b[0] * 8, b[2] * 8 + 8, b[1] * 8, b[3] * 8 + 8);
+                    }}
                 }
                 eprintln!("dispcnt {:04x} bgcnt {:04x} {:04x} {:04x} {:04x} hofs {} {} {} {} vofs {} {} {} {}",
                     r(0), r(8), r(10), r(12), r(14), r(16), r(20), r(24), r(28), r(18), r(22), r(26), r(30));

@@ -17,7 +17,7 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /** UI piece slots exported per frame (touch.rs UI_SLOTS), 9 floats each, then the padded-frame flag. */
-private const val UI_SLOTS=4
+private const val UI_SLOTS=8
 private const val UI_PARAMS=UI_SLOTS*9+4
 
 /** Simulation and audio run together off the UI thread; GL only uploads completed frames. */
@@ -454,10 +454,18 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
             glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR)
             glUseProgram(backdropProgram)
             glUniform1i(glGetUniformLocation(backdropProgram,"image"),0)
-            glUniform4f(glGetUniformLocation(backdropProgram,"region"),
-                (view.extraX+(240f-bandWidth)/2)/view.width,(view.extraY+(160f-bandHeight)/2)/view.height,
-                bandWidth/view.width,bandHeight/view.height)
-            glUniform2f(glGetUniformLocation(backdropProgram,"texel"),4f/view.width,4f/view.height)
+            if(view.extraY>=22){
+                // The engine's 30x20 grid of 8x8 averages at texel (1,1) (engine.rs backdrop_grid).
+                glUniform4f(glGetUniformLocation(backdropProgram,"region"),
+                    (1f+(30f-30f*bandWidth/240f)/2)/view.width,(1f+(20f-20f*bandHeight/160f)/2)/view.height,
+                    30f*bandWidth/240f/view.width,20f*bandHeight/160f/view.height)
+                glUniform2f(glGetUniformLocation(backdropProgram,"texel"),0.75f/view.width,0.75f/view.height)
+            }else{
+                glUniform4f(glGetUniformLocation(backdropProgram,"region"),
+                    (view.extraX+(240f-bandWidth)/2)/view.width,(view.extraY+(160f-bandHeight)/2)/view.height,
+                    bandWidth/view.width,bandHeight/view.height)
+                glUniform2f(glGetUniformLocation(backdropProgram,"texel"),4f/view.width,4f/view.height)
+            }
             val bp=glGetAttribLocation(backdropProgram,"position");val bc=glGetAttribLocation(backdropProgram,"uv")
             glEnableVertexAttribArray(bp);glEnableVertexAttribArray(bc)
             vertices.position(0);uv.position(0)

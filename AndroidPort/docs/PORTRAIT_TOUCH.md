@@ -74,6 +74,34 @@ repository root is not changed; only `AndroidPort/` is.
   stays docked on top. Measured: Down and taps on the moved list update the
   values; a tap on an equipped item gets the game's "can't sell" reply.
 
+## Portrait audit (0.30-android-preview)
+
+Frame-by-frame captures (every 6-8 frames, touch-only, 1080x2400) from the
+user's save: world map menus, Party/status, Shop with a full purchase, Pub
+(Rumors, lists), Prison. Artefacts found and what changed:
+
+1. Remembered towns stayed bright during fades -> stored as OBJ palette
+   indices and coloured with the current palette and BLDCNT brightness.
+2. Pinned HUD showed as black shapes during fades on a fixed-colour margin ->
+   margin is a deep shade of the game's backdrop colour (fades with it).
+3. HUD jumped into the map whenever a menu opened, and 4. a town menu's first
+   opening frame was pinned at the top -> only BG2/BG3 pixels inside the
+   measured HUD boxes are lifted (world_hud.rs HUD_BOXES); menus never are.
+5. Menus flashed at their native left position for ~4 frames before moving
+   (the game draws them before the classifier recognises the town menu),
+6. Clan Funds jumped between positions, 7. lists flashed mid-screen before
+   docking and 8. Clan Funds was pushed off the right edge -> docked
+   placement is decided only by a block's native position (touch.rs
+   dock_for, ui_layout.rs Layout::docked): blocks in the top rows dock to the
+   top, narrow lower-left blocks (menus) to the thumb zone, everything else
+   to the bottom at its native x. Shop lists keep: list bottom, reply top.
+9. The 8 extra columns of the 256-wide portrait view showed wrapped scenery
+   (Prison edge, world map strips) and the UI used a 4.5x scale over a 4.22x
+   picture -> portrait renders exactly 240 columns.
+10. The blurred backdrop showed hard stripes (each native row stretched ~15x)
+   -> the engine writes a 30x20 grid of 8x8 averages into unused padding rows
+   and GameSurface stretches it with linear filtering.
+
 ## Measured with the headless runner (USA ROM, new game, 1080x2400)
 
 - Opening scene and the snowball-fight battle render the extended map above

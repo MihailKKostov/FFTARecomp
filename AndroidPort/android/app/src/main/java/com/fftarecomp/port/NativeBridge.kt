@@ -30,7 +30,10 @@ data class ViewConfig(val extraX: Int, val extraY: Int,val fillScreen:Boolean=fa
         private fun base(aspect:AspectMode,screenWidth:Int,screenHeight:Int):Pair<Double,Double> {
             if(aspect!=AspectMode.DEVICE)return (240+2*aspect.baseExtra).toDouble() to aspect.baseHeight.toDouble()
             val ratio=screenWidth.coerceAtLeast(1).toDouble()/screenHeight.coerceAtLeast(1)
+            // Portrait shows exactly the native 240 columns (no wrapped side columns,
+            // and UI panels share the world's scale); square screens keep 256.
             return if(ratio>=1.5)maxOf(242.0,160*ratio).coerceAtMost(1536.0) to 160.0
+                else if(ratio<1.0)240.0 to (240/ratio).coerceAtMost(800.0)
                 else 256.0 to (256/ratio).coerceAtMost(800.0)
         }
         fun maxZoom(aspect: AspectMode,screenWidth:Int=2280,screenHeight:Int=1080): Int {
