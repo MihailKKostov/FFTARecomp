@@ -159,7 +159,8 @@ pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaMenuButto
     if out.is_null(){return 0;}
     let api=&**env;
     if api.GetArrayLength.unwrap()(env,out)<4{return 0;}
-    let rect=ENGINE.lock().ok().and_then(|lock|lock.as_ref().and_then(|engine|engine.menu_button));
+    // Only when the game picture could not carry the button itself.
+    let rect=ENGINE.lock().ok().and_then(|lock|lock.as_ref().and_then(|engine|engine.menu_button.filter(|_|!engine.menu_button_in_game)));
     match rect {
         Some(rect)=>{api.SetFloatArrayRegion.unwrap()(env,out,0,4,rect.as_ptr());1}
         None=>0,

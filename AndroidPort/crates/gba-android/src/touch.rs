@@ -186,6 +186,15 @@ impl Engine {
         if !self.touch_enabled || !x.is_finite() || !y.is_finite() || !(0. ..1.).contains(&x) || !(0. ..1.).contains(&y){return;}
         if back {self.mouse.cancel();battle::back(&mut self.machine.bus);return;}
         let px=x*self.ui_window.0 as f32;let py=y*self.ui_window.1 as f32;
+        // In-game Menu button on the world map: Start opens the game's menu, B closes an open one.
+        if let Some([bx,by,bw,bh])=self.menu_button.filter(|_|self.menu_button_in_game) {
+            if px>=bx && px<bx+bw && py>=by && py<by+bh {
+                self.mouse.cancel();
+                let keys=if self.machine.bus.world_hud.menu {0x3fd} else {0x3f7};
+                battle::press(&mut self.machine.bus,keys);
+                return;
+            }
+        }
         let band=self.ui_band();
         let state=&self.machine.bus.ffta_dialogue;
         let index=if matches!(state.extra.kind,PanelKind::Actions|PanelKind::Notice)&&state.extra.active(){Some(1)}

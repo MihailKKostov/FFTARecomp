@@ -126,6 +126,17 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+**In-game Menu button (0.34).** The world map Menu button is now part of
+the game picture, built only from the game's own resources (`map_menu.rs`):
+the menu window's bar, translucent body (BLDALPHA) and item gem tiles, which
+stay in BG VRAM on the world map (char base 0x8000, tiles 1 and 9-c, palettes
+12/13), and "Menu" in the game's menu font (USA ROM 0x438630: 16x16 cells,
+digits, A-Z, a-z; the same tiles the game copies for "Party", "Area List").
+The text is white like menu items and the highlighted item's orange while a
+menu is open. A tap on it presses Start, or B while a menu is open. Font and
+tiles are checked against measured bytes; if they differ (other ROMs), the
+app's own overlay button below is used instead.
+
 **World map Menu button (0.33).** Touch-only portrait: a Menu button (Start)
 in the bottom HUD row between Clan Funds (native x 3-77) and the date
 (152-240), where the HUD is pinned below the map (`Engine::map_menu_button`,

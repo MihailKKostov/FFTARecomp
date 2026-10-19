@@ -26,6 +26,9 @@ pub struct Engine {
     pub menu_layout: Option<crate::menu_layout::MenuLayout>,
     /// Screen rectangle of the world map Menu button (touch-only portrait), see `map_menu_button`.
     pub menu_button: Option<[f32;4]>,
+    /// The Menu button is drawn in the game picture (map_menu.rs); otherwise
+    /// the app draws its own button at `menu_button`.
+    pub menu_button_in_game: bool,
     /// HUD brightness of the previous frame and how many frames it has been
     /// unchanged: the game fades the world map by rewriting the palette.
     hud_luma: (u64,u32),
@@ -89,6 +92,14 @@ impl Engine {
         Some([self.world_rect[0]+(mem::extra() as f32+NATIVE[0])*s,bottom-(160.-NATIVE[1])*s,
             (NATIVE[2]-NATIVE[0])*s,(NATIVE[3]-NATIVE[1])*s])
     }
+    /// Screen rectangle of the in-game Menu button (map_menu::NATIVE in the
+    /// bottom HUD row, pinned to the frame bottom).
+    fn game_menu_button(&self)->Option<[f32;4]>{
+        let (_,bottom)=self.ui_dock?;
+        let [x0,y0,x1,y1]=crate::map_menu::NATIVE.map(|v|v as f32);
+        let s=self.world_rect[2]/mem::render_width() as f32;
+        Some([self.world_rect[0]+(mem::extra() as f32+x0)*s,bottom-(160.-y0)*s,(x1-x0)*s,(y1-y0)*s])
+    }
     pub fn texture_rect(&self)->[f32;4]{
         let mut rect=self.world_rect;
         rect[1]+=self.view_shift as f32*rect[3]/mem::render_height() as f32;
@@ -117,7 +128,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,menu_button:None,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,menu_button:None,menu_button_in_game:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -270,7 +281,8 @@ impl Engine {
             self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
         }
         self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock)}else{None};
-        self.menu_button=self.map_menu_button();
+        self.menu_button_in_game=self.touch_enabled && self.machine.bus.world_hud.map_frame && self.world_map.button;
+        self.menu_button=if self.menu_button_in_game {self.game_menu_button()} else {self.map_menu_button()};
         let state=&self.machine.bus.ffta_dialogue;
         if state.town_layout {self.town_menu=crate::touch::town_menu(state).or(self.town_menu);}
         else if !state.shop_layout {self.town_menu=None;}

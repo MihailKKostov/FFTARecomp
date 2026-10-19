@@ -183,7 +183,7 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
         }
     }
     // Touch-only Menu button the app draws over the world map (TouchKey colours).
-    if let Some([bx, by, bw, bh]) = engine.menu_button {
+    if let Some([bx, by, bw, bh]) = engine.menu_button.filter(|_| !engine.menu_button_in_game) {
         let (sw, sh) = (screen.0 as usize, screen.1 as usize);
         for y in by.max(0.) as usize..((by + bh) as usize).min(sh) {
             for x in bx.max(0.) as usize..((bx + bw) as usize).min(sw) {

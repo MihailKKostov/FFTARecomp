@@ -21,7 +21,7 @@ const MISSING_FRAMES: u16 = 20;
 struct Town { x: i32, y: i32, key: u16, indices: Vec<u8>, stable: u16, missing: u16, seen: bool }
 
 /// The GBA brightness effect (BLDCNT mode 2/3) for a first-target layer bit.
-fn faded(bus: &MemMap, color: u16, target: u16) -> u16 {
+pub(crate) fn faded(bus: &MemMap, color: u16, target: u16) -> u16 {
     let control = half(&bus.io, 0x50);
     let mode = (control >> 6) & 3;
     if !matches!(mode, 2 | 3) || control & target == 0 { return color; }
@@ -35,7 +35,11 @@ fn faded(bus: &MemMap, color: u16, target: u16) -> u16 {
 }
 
 #[derive(Default)]
-pub struct WorldMap { towns: Vec<Town> }
+pub struct WorldMap {
+    towns: Vec<Town>,
+    /// The Menu button was drawn with the game's resources this frame (map_menu.rs).
+    pub button: bool,
+}
 
 fn half(data: &[u8], offset: usize) -> u16 { u16::from_le_bytes([data[offset], data[offset + 1]]) }
 
@@ -214,6 +218,8 @@ impl WorldMap {
                 }
             }
         }
+        // Touch-only Menu button in the pinned bottom HUD row.
+        self.button = crate::map_menu::draw(bus, &mut out, rw, rh, ex as usize, dock.1 - 160, bus.world_hud.menu);
         *pixels = out;
     }
 }
