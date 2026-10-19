@@ -77,6 +77,8 @@ object NativeBridge {
     external fun gbaParallelZoom(enabled:Boolean)
     external fun gbaCamera():Long
     external fun gbaSave(): Int
+    external fun gbaCheckpoint(): Int
+    external fun gbaResume(): Int
     external fun gbaStatus(): String
     external fun gbaDiagnostics(): String
 
@@ -90,7 +92,11 @@ object NativeBridge {
         loadError = failure
     }
 
-    fun load(file: File, save: File): Boolean {
+    /** Resume state kept next to the battery save (machine state when the app was left). */
+    fun resumeFile(save: File) = File(save.parentFile, save.nameWithoutExtension + ".resume")
+
+    /** Loads the ROM and its battery save, then continues where the game was left if [resume]. */
+    fun load(file: File, save: File, resume: Boolean = true): Boolean {
         check(loadError == null) { loadError ?: "Native core unavailable" }
         romVerified = false
         compiled = false
@@ -109,6 +115,7 @@ object NativeBridge {
             "ROM mismatch. Select an unmodified FFTA USA or Europe ROM."
         }
         check(gbaLoadRom(bytes, save.absolutePath) == 1) { gbaStatus() }
+        if (resume) gbaResume()
         romVerified = true
         return true
     }

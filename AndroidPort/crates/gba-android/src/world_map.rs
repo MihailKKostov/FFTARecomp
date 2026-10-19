@@ -120,6 +120,26 @@ fn decode(bus: &MemMap, a0: u16, a1: u16, a2: u16) -> Vec<u8> {
 }
 
 impl WorldMap {
+    /// Remembered towns are kept in the resume state (culled towns stay drawn).
+    pub fn save(&self, w: &mut gba_core::savestate::W) {
+        w.u32(self.towns.len() as u32);
+        for t in &self.towns {
+            w.u32(t.x as u32); w.u32(t.y as u32); w.u16(t.key); w.bytes(&t.indices);
+            w.u16(t.stable); w.u16(t.missing); w.bool(t.seen);
+        }
+    }
+    pub fn load(r: &mut gba_core::savestate::R) -> gba_core::savestate::Res<WorldMap> {
+        let count = r.u32()? as usize;
+        if count > 64 { return Err("Bad town cache".into()); }
+        let mut towns = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (x, y, key) = (r.u32()? as i32, r.u32()? as i32, r.u16()?);
+            let indices = r.bytes()?.to_vec();
+            if !indices.is_empty() && indices.len() != 32 * 32 { return Err("Bad town pixels".into()); }
+            towns.push(Town { x, y, key, indices, stable: r.u16()?, missing: r.u16()?, seen: r.bool()? });
+        }
+        Ok(WorldMap { towns, button: false })
+    }
     /// Rows the texture is shifted by (displayed row r shows rendered row r + shift).
     pub fn shift(bus: &MemMap) -> i32 {
         let vofs = (half(&bus.io, 0x12) & 0x1ff) as i32;

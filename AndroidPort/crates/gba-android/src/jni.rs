@@ -48,6 +48,7 @@ pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaLoadRom(
             let bytes = std::fs::read(&save).map_err(|e|format!("Read save: {e}"))?;
             loaded.machine.bus.load_save_data(&bytes);
         }
+        loaded.note_battery();
         loaded.save_path = Some(save);
         loaded.cache_dir = loaded.save_path.as_ref().and_then(|path|path.parent()).map(|path|path.join("compiled"));
         *ENGINE.lock().map_err(|_|"Engine mutex poisoned")? = Some(loaded);
@@ -178,9 +179,29 @@ pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaTap(_: *mut JNIE
 #[no_mangle]
 pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaSave(_: *mut JNIEnv, _: jobject) -> jint {
     guarded(|| {
-        if let Some(engine) = ENGINE.lock().map_err(|_|"Engine mutex poisoned")?.as_ref() { engine.save()?; }
+        if let Some(engine) = ENGINE.lock().map_err(|_|"Engine mutex poisoned")?.as_mut() { engine.save()?; }
         Ok(1)
     })
+}
+
+/// Pause, exit, background: resume state and battery save right away.
+#[no_mangle]
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaCheckpoint(_: *mut JNIEnv, _: jobject) -> jint {
+    guarded(|| {
+        if let Some(engine) = ENGINE.lock().map_err(|_|"Engine mutex poisoned")?.as_mut() { engine.checkpoint()?; }
+        Ok(1)
+    })
+}
+
+/// After loading the ROM: continue where the game was left (1), or start from the battery save (0).
+#[no_mangle]
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaResume(_: *mut JNIEnv, _: jobject) -> jint {
+    let resumed = ENGINE.lock().ok().and_then(|mut lock| lock.as_mut().map(|engine| engine.resume()));
+    match resumed {
+        Some(Ok(true)) => { engine::status("Resumed where the game was left"); 1 }
+        Some(Err(error)) => { engine::status(format!("Resume state not used: {error}")); 0 }
+        _ => 0,
+    }
 }
 
 #[no_mangle]

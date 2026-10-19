@@ -23,7 +23,7 @@ use std::{path::PathBuf, sync::atomic::Ordering};
 
 const BUTTONS: [&str; 10] = ["A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L"];
 
-enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String), Speed(u64), Dump(String) }
+enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String), Speed(u64), Dump(String), State(String), Checkpoint, Save }
 
 struct View { extra_x: usize, extra_y: usize, base_width: f32 }
 
@@ -68,6 +68,9 @@ fn parse_script(text: &str) -> Result<(Vec<(u64, Event)>, Option<u64>), String> 
             }
             "shot" => events.push((frame, Event::Shot(parts.get(2).ok_or_else(error)?.to_string()))),
             "dump" => events.push((frame, Event::Dump(parts.get(2).ok_or_else(error)?.to_string()))),
+            "checkpoint" => events.push((frame, Event::Checkpoint)),
+            "save" => events.push((frame, Event::Save)),
+            "state" => events.push((frame, Event::State(parts.get(2).ok_or_else(error)?.to_string()))),
             "speed" => events.push((frame, Event::Speed(parts.get(2).and_then(|v| v.parse::<u64>().ok()).ok_or_else(error)?.clamp(1, 8)))),
             "end" => end = Some(frame),
             _ => return Err(error()),
@@ -249,12 +252,16 @@ fn main() -> Result<(), String> {
     let (mut rom, mut sav, mut script, mut out, mut save_out) = (None, None, None, PathBuf::from("shots"), None);
     let (mut screen, mut zoom, mut touch, mut frames) = ((2400u32, 1080u32), 0, false, None);
     let (mut speed, mut skip, mut hashes) = (1u64, true, None);
+    let mut state = None;
+    let mut resume = false;
     let mut dock = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
             "--rom" => rom = Some(PathBuf::from(value()?)),
             "--sav" => sav = Some(PathBuf::from(value()?)),
+            "--state" => state = Some(PathBuf::from(value()?)),
+            "--resume" => resume = true,
             "--script" => script = Some(PathBuf::from(value()?)),
             "--out" => out = PathBuf::from(value()?),
             "--save-out" => save_out = Some(PathBuf::from(value()?)),
@@ -288,6 +295,8 @@ fn main() -> Result<(), String> {
     let mut engine = Engine::new(rom);
     if let Some(path) = &sav { engine.machine.bus.load_save_data(&std::fs::read(path).map_err(|e| format!("read save: {e}"))?); }
     engine.save_path = save_out;
+    engine.note_battery();
+    if resume { eprintln!("resumed: {:?}", engine.resume()); }
     engine.skip_hidden_frames = skip;
     let mut hash_log = String::new();
     let mut frame_ns = 0u64;
@@ -297,6 +306,7 @@ fn main() -> Result<(), String> {
         engine.cache_dir = Some(std::env::temp_dir().join("ffta-headless-cache"));
         engine.prepare()?;
     }
+    if let Some(path) = &state { engine.load_state(&std::fs::read(path).map_err(|e| format!("read state: {e}"))?)?; }
     let view = device_view(screen, zoom);
     engine.configure_touch(touch, view.base_width, 1., 1.);
     engine.ui_dock = dock;
@@ -326,6 +336,9 @@ fn main() -> Result<(), String> {
                 Event::Shot(name) => shots.push(name.clone()),
                 Event::Speed(_) => {}
                 Event::Dump(name) => dumps.push(name.clone()),
+                Event::State(path) => std::fs::write(path, engine.save_state()).map_err(|e| e.to_string())?,
+                Event::Checkpoint => engine.checkpoint()?,
+                Event::Save => engine.save()?,
             }
         }
         held.retain(|h| h.1 > frame);
@@ -399,7 +412,7 @@ fn main() -> Result<(), String> {
         }
         frame += speed;
     }
-    engine.save()?;
+    if std::env::var_os("FFTA_NO_FINAL_SAVE").is_none() { engine.save()?; }
     if let Some(path) = &hashes { std::fs::write(path, hash_log).map_err(|e| e.to_string())?; }
     eprintln!("engine time {:.2} ms per emulated frame (speed {speed}, skip {skip})", frame_ns as f64 / 1e6 / last as f64);
     eprintln!("{last} frames in {:.1}s ({} native dispatches, {} interpreted instructions)",

@@ -550,3 +550,25 @@ mod tests {
         assert_eq!(rtc.now().hour, 8);
     }
 }
+
+impl Rtc {
+    pub(crate) fn save_state(&self, w: &mut crate::savestate::W) {
+        w.u8(self.data); w.u8(self.direction); w.bool(self.read_enable);
+        w.bool(self.sck); w.bool(self.cs); w.bool(self.sio_out);
+        w.u8(match self.phase { Phase::Idle => 0, Phase::Command => 1, Phase::Read => 2, Phase::Write => 3 });
+        w.u8(self.cmd_acc); w.u8(self.nbits); w.u32(self.byte_idx as u32); w.u32(self.buflen as u32);
+        self.buffer.iter().for_each(|&b| w.u8(b));
+        w.u8(self.reg); w.bool(self.lsb_first); w.u8(self.control); w.i64(self.offset);
+    }
+    /// Restores into `self`, keeping its host settings (fixed clock, tracing).
+    pub(crate) fn load_state(&self, r: &mut crate::savestate::R) -> crate::savestate::Res<Rtc> {
+        let mut rtc = Rtc { fixed: self.fixed, trace: self.trace, ..*self };
+        rtc.data = r.u8()?; rtc.direction = r.u8()?; rtc.read_enable = r.bool()?;
+        rtc.sck = r.bool()?; rtc.cs = r.bool()?; rtc.sio_out = r.bool()?;
+        rtc.phase = match r.u8()? { 1 => Phase::Command, 2 => Phase::Read, 3 => Phase::Write, _ => Phase::Idle };
+        rtc.cmd_acc = r.u8()?; rtc.nbits = r.u8()?; rtc.byte_idx = (r.u32()? as usize).min(6); rtc.buflen = (r.u32()? as usize).min(7);
+        for b in rtc.buffer.iter_mut() { *b = r.u8()?; }
+        rtc.reg = r.u8()?; rtc.lsb_first = r.bool()?; rtc.control = r.u8()?; rtc.offset = r.i64()?;
+        Ok(rtc)
+    }
+}

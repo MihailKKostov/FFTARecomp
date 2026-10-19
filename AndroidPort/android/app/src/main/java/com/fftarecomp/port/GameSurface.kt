@@ -159,7 +159,8 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                     taps.clear()
                     normalOutput.active=false
                     if (!wasPaused) {
-                        NativeBridge.gbaSave()
+                        // Paused, backgrounded or leaving: keep the exact moment to resume from.
+                        NativeBridge.gbaCheckpoint()
                         buttons.set(0)
                         track?.pause(); track?.flush()
                         queuedCount = 0
@@ -266,7 +267,7 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
         } finally {
             normalOutput.close()
             NativeBridge.gbaNormalAudioReader(false)
-            try { NativeBridge.gbaSave() } catch (_: Throwable) {}
+            try { NativeBridge.gbaCheckpoint() } catch (_: Throwable) {}
             try { track?.pause(); track?.flush(); track?.release() } catch (_: Exception) {}
         }
     }

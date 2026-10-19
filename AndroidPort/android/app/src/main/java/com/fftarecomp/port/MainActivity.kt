@@ -168,6 +168,11 @@ class MainActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         }
     }
     override fun onPause() { input.clear();settings.pad.clear();settings.holdFast=false;super.onPause() }
+    /** Android may end a stopped app without notice: keep the moment to resume from. */
+    override fun onStop() {
+        if(NativeBridge.romVerified && !GameBenchmark.enabled(this))runCatching{NativeBridge.gbaCheckpoint()}
+        super.onStop()
+    }
     private fun routePad(source:String,held:Set<PadControl>) {
         for((action,down) in settings.pad.update(source,held)){
             if(action.mask!=0)input.set("pad:"+action.name,if(down)action.mask else 0)
@@ -277,7 +282,7 @@ private fun MainScreen(settings: GameSettings, input: GameInput, setInGame: (Boo
             busy=true
             try {
                 withContext(Dispatchers.Default){
-                    if(!NativeBridge.romVerified)NativeBridge.load(rom,save)
+                    if(!NativeBridge.romVerified)NativeBridge.load(rom,save,!GameBenchmark.enabled(context))
                     if(!NativeBridge.compiled)NativeBridge.prepare()
                     startup.setReady(true)
                 }
@@ -307,7 +312,7 @@ private fun MainScreen(settings: GameSettings, input: GameInput, setInGame: (Boo
                                 }
                             } ?: throw IllegalStateException("Cannot read the selected document")
                             if(NativeBridge.romVerified)NativeBridge.gbaSave()
-                            NativeBridge.load(temp,save)
+                            NativeBridge.load(temp,save,!GameBenchmark.enabled(context))
                             temp.copyTo(rom,overwrite=true)
                             mustSelectRom=false
                             startup.setReady(false)
@@ -374,7 +379,7 @@ private fun MainScreen(settings: GameSettings, input: GameInput, setInGame: (Boo
                     scope.launch {
                         try {
                             withContext(Dispatchers.Default) {
-                                if(!NativeBridge.romVerified)NativeBridge.load(rom,save)
+                                if(!NativeBridge.romVerified)NativeBridge.load(rom,save,!GameBenchmark.enabled(context))
                                 if(!NativeBridge.compiled)NativeBridge.prepare()
                                 startup.setReady(true)
                             }
@@ -647,7 +652,9 @@ private fun importSave(context:Context,rom:File,save:File,uri:android.net.Uri) {
     val temp=File(save.parentFile,save.name+".import")
     temp.writeBytes(bytes)
     check(temp.renameTo(save)){"Cannot replace the save file"}
-    if(NativeBridge.romVerified)NativeBridge.load(rom,save)
+    // The imported save starts fresh: the resume state holds the old one.
+    NativeBridge.resumeFile(save).delete()
+    if(NativeBridge.romVerified)NativeBridge.load(rom,save,resume=false)
 }
 
 @Composable

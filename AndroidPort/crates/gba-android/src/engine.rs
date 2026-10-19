@@ -56,6 +56,9 @@ pub struct Engine {
     pub(crate) party_cache: Option<crate::menu_layout::PartyCache>,
     /// A unit selected by tap, reached one press at a time (`drive_party_goal`).
     pub(crate) party_goal: Option<PartyGoal>,
+    /// Last battery save written, and the frame of the last resume state.
+    last_battery: Option<Vec<u8>>,
+    resume_frame: u64,
     /// Screen rectangle of the world map Menu button (touch-only portrait), see `map_menu_button`.
     pub menu_button: Option<[f32;4]>,
     /// The Menu button is drawn in the game picture (map_menu.rs); otherwise
@@ -123,6 +126,34 @@ impl Engine {
         let s=self.world_rect[2]/mem::render_width() as f32;
         Some([self.world_rect[0]+(mem::extra() as f32+NATIVE[0])*s,bottom-(160.-NATIVE[1])*s,
             (NATIVE[2]-NATIVE[0])*s,(NATIVE[3]-NATIVE[1])*s])
+    }
+    /// Resume state of the whole machine (gba-core savestate.rs), taken between frames.
+    /// The machine state followed by what the portrait presentation keeps
+    /// across frames (remembered towns, the party picture), so a resumed game
+    /// looks exactly as it was left.
+    pub fn save_state(&self)->Vec<u8>{
+        let core=gba_core::savestate::save(&self.machine);
+        let mut w=gba_core::savestate::W(Vec::with_capacity(core.len()+64*1024));
+        w.bytes(&core);
+        self.world_map.save(&mut w);
+        w.bool(self.party_cache.is_some());
+        if let Some(cache)=&self.party_cache {cache.save(&mut w);}
+        w.0
+    }
+    /// Restores a resume state. Input in flight is dropped; a presentation
+    /// part that cannot be read starts empty (it is refilled as the game draws).
+    pub fn load_state(&mut self,data:&[u8])->Result<(),String>{
+        let mut r=gba_core::savestate::R::new(data);
+        gba_core::savestate::load(&mut self.machine,r.bytes()?)?;
+        self.mouse.cancel();
+        self.machine.bus.ffta_battle_mouse.cancel();
+        self.party_goal=None;self.town_menu=None;self.menu_layout=None;self.view_shift=0;
+        self.world_map=crate::world_map::WorldMap::load(&mut r).unwrap_or_default();
+        self.party_cache=match r.bool() {
+            Ok(true)=>crate::menu_layout::PartyCache::load(&mut r).ok(),
+            _=>None,
+        };
+        Ok(())
     }
     /// Screen rectangle of the in-game Menu button (map_menu::NATIVE in the
     /// bottom HUD row, pinned to the frame bottom).
@@ -200,7 +231,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,menu_button:None,menu_button_in_game:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,last_battery:None,resume_frame:0,menu_button:None,menu_button_in_game:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -404,13 +435,46 @@ impl Engine {
         if std::fs::create_dir_all(directory).is_err(){return None;}
         Some(directory.join(format!("{kind}-{}-{}.o",env!("FFTA_ANDROID_CACHE_TAG"),self.rom_cache_key)))
     }
-    pub fn save(&self) -> Result<(), String> {
-        if let (Some(path), Some(data)) = (&self.save_path, self.machine.bus.save_data()) {
-            let temp = path.with_extension("sav.tmp");
-            std::fs::write(&temp, data).map_err(|e| e.to_string())?;
-            std::fs::rename(temp, path).map_err(|e| e.to_string())?;
+    /// Persists progress. The battery save is written only when it changed,
+    /// and the resume state first, so a resume state never holds an older
+    /// in-game save than the battery file. Every 600 frames (about 10 s) the
+    /// resume state is refreshed as well; `checkpoint` forces it.
+    pub fn save(&mut self) -> Result<(), String> {
+        let data = self.machine.bus.save_data().map(|d| d.to_vec());
+        let changed = data.is_some() && data != self.last_battery;
+        if changed || self.machine.bus.frames >= self.resume_frame + RESUME_INTERVAL { self.write_resume()?; }
+        if let (true, Some(path), Some(data)) = (changed, &self.save_path, &data) {
+            write_atomic(path, data)?;
         }
+        if changed { self.last_battery = data; }
         Ok(())
+    }
+    /// The battery save as loaded from disk is already written.
+    pub fn note_battery(&mut self) { self.last_battery = self.machine.bus.save_data().map(|d| d.to_vec()); }
+    /// App paused, closing or leaving the game: resume state and battery save now.
+    pub fn checkpoint(&mut self) -> Result<(), String> {
+        self.write_resume()?;
+        self.save()
+    }
+    fn resume_path(&self) -> Option<PathBuf> { self.save_path.as_ref().map(|p| p.with_extension("resume")) }
+    fn write_resume(&mut self) -> Result<(), String> {
+        if let Some(path) = self.resume_path() { write_atomic(&path, &self.save_state())?; }
+        self.resume_frame = self.machine.bus.frames;
+        Ok(())
+    }
+    /// Continues from the resume state next to the save file, if there is one
+    /// for this ROM. A state that cannot be used is kept aside (`.resume.bad`)
+    /// and the game starts from its battery save as before.
+    pub fn resume(&mut self) -> Result<bool, String> {
+        let Some(path) = self.resume_path().filter(|p| p.is_file()) else { return Ok(false) };
+        let data = std::fs::read(&path).map_err(|e| format!("Read resume state: {e}"))?;
+        if let Err(error) = self.load_state(&data) {
+            let _ = std::fs::rename(&path, path.with_extension("resume.bad"));
+            return Err(error);
+        }
+        self.last_battery = self.machine.bus.save_data().map(|d| d.to_vec());
+        self.resume_frame = self.machine.bus.frames;
+        Ok(true)
     }
     pub fn diagnostics(&self) -> String {
         let state=&self.machine.bus.ffta_dialogue;
@@ -430,6 +494,19 @@ impl Engine {
 /// so a 30x20 grid of 8x8 averages (plus a 1-texel clamped border) is written
 /// into the unused padding rows at texture (0,0)-(32,22) for it to sample.
 pub const BACKDROP_GRID:(usize,usize)=(30,20);
+
+/// Frames between periodic resume states (about 10 s of play).
+const RESUME_INTERVAL: u64 = 600;
+
+/// Writes through a synced temporary file and a rename, so a crash or power
+/// loss leaves either the old or the new file, never a torn one.
+fn write_atomic(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let temp = path.with_extension(format!("{}.tmp", path.extension().and_then(|e| e.to_str()).unwrap_or("")));
+    let mut file = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+    file.write_all(data).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+    std::fs::rename(&temp, path).map_err(|e| e.to_string())
+}
 fn backdrop_grid(pixels:&mut [i32]){
     let (rw,ey,ex)=(mem::render_width(),mem::extra_y(),mem::extra());
     let (gw,gh)=BACKDROP_GRID;

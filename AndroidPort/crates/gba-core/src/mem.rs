@@ -2075,3 +2075,113 @@ mod tests {
         assert_eq!(mem.read8(0x0100_0000), 0x0D);
     }
 }
+
+/// Everything of `MemMap` a resume state holds (see savestate.rs), decoded
+/// in full before it is applied.
+pub(crate) struct BusState<'a> {
+    regions: [&'a [u8]; 7],
+    clock: u64, reg_ie: u16, reg_if: u16, ime: bool, halted: bool, intr_wait_armed: bool,
+    keys: u16, keypad_prev: bool, wave_shadow: [u8; 16],
+    timers: [Timer; 4], dma: [Dma; 4],
+    vline_start: u64, vphase: VPhase, frame_ready: bool, frames: u64,
+    aff_ref: [i32; 4], aff_dirty: [bool; 2], bios_open: u32, pc_in_bios: bool,
+    flash: Option<Flash>, eeprom: Option<Eeprom>, rtc: Option<Vec<u8>>,
+    fifo: [Vec<i8>; 2], fifo_sample: [i8; 2], audio_cursor: u64, apu: crate::apu::Apu, next_event: u64,
+    movement: ([Option<(i32, i32)>; 2], [bool; 2], [u16; 2]),
+    stage: ([Option<u32>; 2], [Option<(i32, i32)>; 2], [bool; 2]),
+}
+
+fn put_point(w: &mut crate::savestate::W, p: Option<(i32, i32)>) {
+    w.bool(p.is_some()); let (x, y) = p.unwrap_or((0, 0)); w.u32(x as u32); w.u32(y as u32);
+}
+fn get_point(r: &mut crate::savestate::R) -> crate::savestate::Res<Option<(i32, i32)>> {
+    let has = r.bool()?; let (x, y) = (r.u32()? as i32, r.u32()? as i32); Ok(has.then_some((x, y)))
+}
+
+impl MemMap {
+    pub(crate) fn save_state(&self, w: &mut crate::savestate::W) {
+        for region in [&self.ewram, &self.iwram, &self.io, &self.palette, &self.vram, &self.oam, &self.sram] { w.bytes(region); }
+        w.u64(self.clock); w.u16(self.reg_ie); w.u16(self.reg_if); w.bool(self.ime); w.bool(self.halted); w.bool(self.intr_wait_armed);
+        w.u16(self.keys); w.bool(self.keypad_prev); self.wave_shadow.iter().for_each(|&b| w.u8(b));
+        for t in &self.timers { w.u16(t.reload); w.u8(t.control); w.u16(t.count); w.u64(t.last_sync); }
+        for d in &self.dma { w.u32(d.src); w.u32(d.dst); w.u16(d.count); w.u16(d.control); w.u32(d.cur_src); w.u32(d.cur_dst); }
+        w.u64(self.vline_start); w.u8(matches!(self.vphase, VPhase::LineEnd) as u8); w.bool(self.frame_ready); w.u64(self.frames);
+        self.aff_ref.iter().for_each(|&v| w.u32(v as u32)); self.aff_dirty.iter().for_each(|&v| w.bool(v));
+        w.u32(self.bios_open); w.bool(self.pc_in_bios);
+        w.bool(self.flash.is_some()); if let Some(f) = &self.flash { f.save_state(w); }
+        w.bool(self.eeprom.is_some()); if let Some(e) = &self.eeprom { e.save_state(w); }
+        w.bool(self.rtc.is_some()); if let Some(rtc) = &self.rtc { let mut inner = crate::savestate::W(Vec::new()); rtc.save_state(&mut inner); w.bytes(&inner.0); }
+        for q in &self.fifo { w.bytes(&q.iter().map(|&v| v as u8).collect::<Vec<_>>()); }
+        self.fifo_sample.iter().for_each(|&v| w.u8(v as u8));
+        w.u64(self.audio_cursor); self.apu.save_state(w); w.u64(self.next_event);
+        let m = &self.ffta_movement;
+        m.origins.iter().for_each(|&p| put_point(w, p)); m.valid.iter().for_each(|&v| w.bool(v)); m.sky_edges.iter().for_each(|&v| w.u16(v));
+        let st = &self.ffta_stage;
+        st.bases.iter().for_each(|&b| { w.bool(b.is_some()); w.u32(b.unwrap_or(0)); });
+        st.origins.iter().for_each(|&p| put_point(w, p)); st.valid.iter().for_each(|&v| w.bool(v));
+    }
+}
+
+impl<'a> BusState<'a> {
+    pub(crate) fn load(r: &mut crate::savestate::R<'a>) -> crate::savestate::Res<BusState<'a>> {
+        let mut regions: [&[u8]; 7] = [&[]; 7];
+        for region in regions.iter_mut() { *region = r.bytes()?; }
+        let (clock, reg_ie, reg_if, ime, halted, intr_wait_armed) = (r.u64()?, r.u16()?, r.u16()?, r.bool()?, r.bool()?, r.bool()?);
+        let (keys, keypad_prev) = (r.u16()?, r.bool()?);
+        let mut wave_shadow = [0u8; 16]; for b in wave_shadow.iter_mut() { *b = r.u8()?; }
+        let mut timers = [Timer::default(); 4];
+        for t in timers.iter_mut() { *t = Timer { reload: r.u16()?, control: r.u8()?, count: r.u16()?, last_sync: r.u64()? }; }
+        let mut dma = [Dma::default(); 4];
+        for d in dma.iter_mut() { *d = Dma { src: r.u32()?, dst: r.u32()?, count: r.u16()?, control: r.u16()?, cur_src: r.u32()?, cur_dst: r.u32()? }; }
+        let vline_start = r.u64()?;
+        let vphase = if r.u8()? == 1 { VPhase::LineEnd } else { VPhase::Hblank };
+        let (frame_ready, frames) = (r.bool()?, r.u64()?);
+        let mut aff_ref = [0i32; 4]; for v in aff_ref.iter_mut() { *v = r.u32()? as i32; }
+        let aff_dirty = [r.bool()?, r.bool()?];
+        let (bios_open, pc_in_bios) = (r.u32()?, r.bool()?);
+        let flash = if r.bool()? { Some(Flash::load_state(r)?) } else { None };
+        let eeprom = if r.bool()? { Some(Eeprom::load_state(r)?) } else { None };
+        let rtc = if r.bool()? { Some(r.bytes()?.to_vec()) } else { None };
+        let fifo = [r.bytes()?.iter().map(|&v| v as i8).collect(), r.bytes()?.iter().map(|&v| v as i8).collect()];
+        let fifo_sample = [r.u8()? as i8, r.u8()? as i8];
+        let (audio_cursor, apu, next_event) = (r.u64()?, crate::apu::Apu::load_state(r)?, r.u64()?);
+        let movement = ([get_point(r)?, get_point(r)?], [r.bool()?, r.bool()?], [r.u16()?, r.u16()?]);
+        let mut bases = [None; 2];
+        for b in bases.iter_mut() { let (has, v) = (r.bool()?, r.u32()?); *b = has.then_some(v); }
+        let stage = (bases, [get_point(r)?, get_point(r)?], [r.bool()?, r.bool()?]);
+        Ok(BusState { regions, clock, reg_ie, reg_if, ime, halted, intr_wait_armed, keys, keypad_prev, wave_shadow, timers, dma,
+            vline_start, vphase, frame_ready, frames, aff_ref, aff_dirty, bios_open, pc_in_bios, flash, eeprom, rtc,
+            fifo, fifo_sample, audio_cursor, apu, next_event, movement, stage })
+    }
+
+    /// Applies the state; fails without changes when it does not fit this cartridge.
+    pub(crate) fn apply(self, bus: &mut MemMap) -> crate::savestate::Res<()> {
+        let targets = [bus.ewram.len(), bus.iwram.len(), bus.io.len(), bus.palette.len(), bus.vram.len(), bus.oam.len(), bus.sram.len()];
+        if self.regions.iter().zip(targets).any(|(r, n)| r.len() != n)
+            || self.flash.is_some() != bus.flash.is_some() || self.eeprom.is_some() != bus.eeprom.is_some()
+            || self.rtc.is_some() != bus.rtc.is_some() {
+            return Err("Resume state does not fit this cartridge".into());
+        }
+        let rtc = match (&self.rtc, &bus.rtc) {
+            (Some(data), Some(current)) => Some(current.load_state(&mut crate::savestate::R::new(data))?),
+            _ => None,
+        };
+        for (target, source) in [&mut bus.ewram, &mut bus.iwram, &mut bus.io, &mut bus.palette, &mut bus.vram, &mut bus.oam, &mut bus.sram]
+            .into_iter().zip(self.regions) { target.copy_from_slice(source); }
+        bus.clock = self.clock; bus.reg_ie = self.reg_ie; bus.reg_if = self.reg_if; bus.ime = self.ime; bus.halted = self.halted;
+        bus.intr_wait_armed = self.intr_wait_armed; bus.keys = self.keys; bus.keypad_prev = self.keypad_prev; bus.wave_shadow = self.wave_shadow;
+        bus.timers = self.timers; bus.dma = self.dma; bus.vline_start = self.vline_start; bus.vphase = self.vphase;
+        bus.frame_ready = self.frame_ready; bus.frames = self.frames; bus.aff_ref = self.aff_ref; bus.aff_dirty = self.aff_dirty;
+        bus.bios_open = self.bios_open; bus.pc_in_bios = self.pc_in_bios;
+        if self.flash.is_some() { bus.flash = self.flash; }
+        if self.eeprom.is_some() { bus.eeprom = self.eeprom; }
+        if rtc.is_some() { bus.rtc = rtc; }
+        bus.fifo = self.fifo.map(std::collections::VecDeque::from);
+        bus.fifo_sample = self.fifo_sample; bus.audio_cursor = self.audio_cursor; bus.apu = self.apu; bus.next_event = self.next_event;
+        (bus.ffta_movement.origins, bus.ffta_movement.valid, bus.ffta_movement.sky_edges) = self.movement;
+        (bus.ffta_stage.bases, bus.ffta_stage.origins, bus.ffta_stage.valid) = self.stage;
+        bus.audio_buf.clear();
+        Ok(())
+    }
+}
+

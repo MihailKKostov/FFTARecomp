@@ -10,7 +10,7 @@
 //! own, raw sprite colours) is blended under the unit selected now. Taps use
 //! the game's own controls: on the roster its cursor and A (and the bar's L,
 //! Start and R), on unit screens its Left/Right unit cycling.
-use gba_core::{mem::{self, MemMap}, menu_screen::{Template, PERIOD, TRANSPARENT}};
+use gba_core::{mem::{self, MemMap}, menu_screen::{Template, PERIOD, TRANSPARENT}, savestate::{Res, R, W}};
 
 /// Measured USA roster state (EWRAM): cursor position (x, y halfwords) and
 /// the selected unit's index, which unit screens also show.
@@ -42,7 +42,33 @@ pub struct PartyCache {
     ellipse_cell: [i32; 2],
 }
 
+fn put_pixels(w: &mut W, pixels: &[u16]) { w.bytes(&pixels.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<_>>()); }
+fn get_pixels(r: &mut R) -> Res<Vec<u16>> { Ok(r.bytes()?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()) }
+
 impl PartyCache {
+    /// Kept in the resume state: the party is shown on unit screens too.
+    pub fn save(&self, w: &mut W) {
+        put_pixels(w, &self.bar);
+        w.u32(self.cells.len() as u32);
+        for cell in &self.cells { w.bool(cell.is_some()); put_pixels(w, cell.as_deref().unwrap_or(&[])); }
+        put_pixels(w, &self.ellipse);
+        w.u32(self.ellipse_cell[0] as u32); w.u32(self.ellipse_cell[1] as u32);
+    }
+    pub fn load(r: &mut R) -> Res<PartyCache> {
+        let bar = get_pixels(r)?;
+        let count = r.u32()? as usize;
+        if count != MAX_UNITS || bar.len() != (BAR_ROWS * 240) as usize { return Err("Bad party cache".into()); }
+        let mut cells = Vec::with_capacity(count);
+        for _ in 0..count {
+            let has = r.bool()?;
+            let cell = get_pixels(r)?;
+            if has && cell.len() != (CELL_W * CELL_H) as usize { return Err("Bad party cell".into()); }
+            cells.push(has.then_some(cell));
+        }
+        let ellipse = get_pixels(r)?;
+        if ellipse.len() != 240 * 160 { return Err("Bad party ellipse".into()); }
+        Ok(PartyCache { bar, cells, ellipse, ellipse_cell: [r.u32()? as i32, r.u32()? as i32] })
+    }
     pub fn count(&self) -> usize { self.cells.iter().rposition(Option::is_some).map_or(0, |i| i + 1) }
     pub fn has_unit(&self, i: usize) -> bool { self.cells.get(i).is_some_and(Option::is_some) }
 

@@ -431,3 +431,38 @@ mod tests {
         assert_eq!(got, want);
     }
 }
+
+impl Envelope {
+    fn save_state(&self, w: &mut crate::savestate::W) { w.u8(self.volume); w.bool(self.increase); w.u8(self.period); w.u32(self.timer); }
+    fn load_state(r: &mut crate::savestate::R) -> crate::savestate::Res<Envelope> {
+        Ok(Envelope { volume: r.u8()?, increase: r.bool()?, period: r.u8()?, timer: r.u32()? })
+    }
+}
+impl Square {
+    fn save_state(&self, w: &mut crate::savestate::W) {
+        w.bool(self.on); w.u32(self.duty as u32); w.u32(self.phase as u32); w.u32(self.acc); w.u32(self.freq);
+        self.env.save_state(w); w.u32(self.length); w.bool(self.use_length);
+        w.u8(self.sweep_shift); w.bool(self.sweep_decrease); w.u8(self.sweep_period); w.u32(self.sweep_timer);
+    }
+    fn load_state(r: &mut crate::savestate::R) -> crate::savestate::Res<Square> {
+        Ok(Square { on: r.bool()?, duty: (r.u32()? & 3) as usize, phase: (r.u32()? & 7) as usize, acc: r.u32()?, freq: r.u32()?,
+            env: Envelope::load_state(r)?, length: r.u32()?, use_length: r.bool()?,
+            sweep_shift: r.u8()?, sweep_decrease: r.bool()?, sweep_period: r.u8()?, sweep_timer: r.u32()? })
+    }
+}
+impl Apu {
+    pub(crate) fn save_state(&self, w: &mut crate::savestate::W) {
+        for sq in &self.sq { sq.save_state(w); }
+        w.bool(self.wave_on); w.u32(self.wave_pos as u32); w.u32(self.wave_acc); w.u32(self.wave_freq);
+        w.u8(self.wave_shift); w.bool(self.wave_dim64);
+        w.bool(self.noise_on); w.u16(self.noise_lfsr); w.u32(self.noise_acc); self.noise_env.save_state(w);
+        w.u32(self.noise_div); w.bool(self.noise_width7); w.u32(self.frame_acc);
+    }
+    pub(crate) fn load_state(r: &mut crate::savestate::R) -> crate::savestate::Res<Apu> {
+        Ok(Apu { sq: [Square::load_state(r)?, Square::load_state(r)?],
+            wave_on: r.bool()?, wave_pos: (r.u32()? & 63) as usize, wave_acc: r.u32()?, wave_freq: r.u32()?,
+            wave_shift: r.u8()?, wave_dim64: r.bool()?,
+            noise_on: r.bool()?, noise_lfsr: r.u16()?, noise_acc: r.u32()?, noise_env: Envelope::load_state(r)?,
+            noise_div: r.u32()?, noise_width7: r.bool()?, frame_acc: r.u32()? })
+    }
+}

@@ -348,3 +348,38 @@ mod tests {
         assert_eq!(byte, 0xA5);
     }
 }
+
+const FLASH_STATES: [FlashState; 8] = [FlashState::Ready, FlashState::Cmd1, FlashState::Cmd2, FlashState::Erase,
+    FlashState::EraseCmd1, FlashState::EraseCmd2, FlashState::Write, FlashState::Bank];
+impl Flash {
+    pub(crate) fn save_state(&self, w: &mut crate::savestate::W) {
+        w.bytes(&self.data);
+        w.u8(FLASH_STATES.iter().position(|s| *s == self.state).unwrap_or(0) as u8);
+        w.bool(self.id_mode); w.u32(self.bank as u32); w.bool(self.two_banks);
+    }
+    pub(crate) fn load_state(r: &mut crate::savestate::R) -> crate::savestate::Res<Flash> {
+        let data = r.bytes()?.to_vec();
+        let state = *FLASH_STATES.get(r.u8()? as usize).ok_or("Bad flash state")?;
+        let (id_mode, bank, two_banks) = (r.bool()?, r.u32()? as usize, r.bool()?);
+        if bank > 1 || data.len() != if two_banks { 0x20000 } else { 0x10000 } { return Err("Bad flash bank".into()); }
+        Ok(Flash { data, state, id_mode, bank, two_banks })
+    }
+}
+impl Eeprom {
+    pub(crate) fn save_state(&self, w: &mut crate::savestate::W) {
+        w.bytes(&self.data);
+        w.bytes(&self.in_bits.iter().map(|&b| b as u8).collect::<Vec<_>>());
+        match self.mode {
+            EepromMode::Idle => { w.u8(0); w.u32(0); w.u32(0); }
+            EepromMode::Reading { addr, bit } => { w.u8(1); w.u32(addr as u32); w.u32(bit); }
+        }
+        w.bool(self.wide);
+    }
+    pub(crate) fn load_state(r: &mut crate::savestate::R) -> crate::savestate::Res<Eeprom> {
+        let data = r.bytes()?.to_vec();
+        let in_bits = r.bytes()?.iter().map(|&b| b != 0).collect();
+        let (kind, addr, bit) = (r.u8()?, r.u32()? as usize, r.u32()?);
+        let mode = if kind == 1 { EepromMode::Reading { addr, bit } } else { EepromMode::Idle };
+        Ok(Eeprom { data, in_bits, mode, wide: r.bool()? })
+    }
+}

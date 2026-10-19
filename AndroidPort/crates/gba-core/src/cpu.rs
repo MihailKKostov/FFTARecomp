@@ -257,3 +257,22 @@ impl Default for Cpu {
         Cpu::new()
     }
 }
+
+impl Cpu {
+    pub(crate) fn save_state(&self, w: &mut crate::savestate::W) {
+        for v in self.regs { w.u32(v); }
+        w.u32(self.cpsr);
+        w.bool(self.branch.is_some()); w.u32(self.branch.unwrap_or(0));
+        for v in self.bank_r13.iter().chain(&self.bank_r14).chain(&self.spsr).chain(&self.usr_r8_12).chain(&self.fiq_r8_12) { w.u32(*v); }
+    }
+    pub(crate) fn load_state(r: &mut crate::savestate::R) -> crate::savestate::Res<Cpu> {
+        let mut cpu = Cpu::new();
+        for v in cpu.regs.iter_mut() { *v = r.u32()?; }
+        cpu.cpsr = r.u32()?;
+        let (has, branch) = (r.bool()?, r.u32()?);
+        cpu.branch = has.then_some(branch);
+        for v in cpu.bank_r13.iter_mut().chain(cpu.bank_r14.iter_mut()).chain(cpu.spsr.iter_mut())
+            .chain(cpu.usr_r8_12.iter_mut()).chain(cpu.fiq_r8_12.iter_mut()) { *v = r.u32()?; }
+        Ok(cpu)
+    }
+}

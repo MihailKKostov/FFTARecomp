@@ -35,6 +35,7 @@ pub mod mp2k;
 pub mod ppu;
 pub mod world_hud;
 pub mod menu_screen;
+pub mod savestate;
 pub mod rdrv;
 pub mod rtc;
 pub mod shadow;
