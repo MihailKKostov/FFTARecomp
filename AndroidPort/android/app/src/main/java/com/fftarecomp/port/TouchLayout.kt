@@ -22,10 +22,22 @@ data class TouchPlacement(val x:Float,val y:Float,val visible:Boolean=true,val s
         x=x+if(availableWidth>0f)dx/availableWidth else 0f,
         y=y+if(availableHeight>0f)dy/availableHeight else 0f,centeredRow=false).bounded()
 }
-class TouchPositions {
+fun landscapeDefault(control:TouchControl)=TouchPlacement(control.x,control.y,control.visibleByDefault,centeredRow=control in TouchGeometry.bottomRow)
+/** Portrait keeps every control in the lower part of the screen, under the thumbs and off the game band. */
+fun portraitDefault(control:TouchControl)=when(control){
+    TouchControl.L->TouchPlacement(0f,.70f)
+    TouchControl.R->TouchPlacement(1f,.70f)
+    TouchControl.ZOOM_IN->TouchPlacement(.86f,.03f)
+    TouchControl.ZOOM_OUT->TouchPlacement(1f,.03f)
+    TouchControl.A->TouchPlacement(1f,.82f)
+    TouchControl.B->TouchPlacement(.83f,.93f)
+    TouchControl.DPAD->TouchPlacement(0f,.95f)
+    else->landscapeDefault(control)
+}
+class TouchPositions(private val defaults:(TouchControl)->TouchPlacement=::landscapeDefault) {
     val positions=mutableStateMapOf<TouchControl,TouchPlacement>()
     init{reset()}
-    fun reset(){positions.clear();TouchControl.entries.forEach{positions[it]=TouchPlacement(it.x,it.y,it.visibleByDefault,centeredRow=it in TouchGeometry.bottomRow)}}
+    fun reset(){positions.clear();TouchControl.entries.forEach{positions[it]=defaults(it)}}
     fun snapshot():Map<TouchControl,TouchPlacement> = positions.toMap()
     fun restore(snapshot:Map<TouchControl,TouchPlacement>){
         reset();snapshot.forEach{(key,value)->positions[key]=value.bounded()}
@@ -34,7 +46,10 @@ class TouchPositions {
 @Stable
 class TouchLayout(context:Context){
     private val prefs=context.getSharedPreferences("touch_layout_v1",Context.MODE_PRIVATE)
-    val layout=TouchPositions().apply{
+    /** Set by the game screen; selects which of the two layouts is shown and edited. */
+    var portrait by mutableStateOf(false)
+    val layout get()=if(portrait)portraitLayout else landscapeLayout
+    private val landscapeLayout=TouchPositions().apply{
         val alignSavedBottomRow=prefs.getInt("layout_revision",0)<1
         TouchControl.entries.forEach{control->
             val oldX=prefs.getFloat(control.name+"_x",control.x)
@@ -48,6 +63,14 @@ class TouchLayout(context:Context){
                 alignSavedBottomRow&&align || prefs.getBoolean(control.name+"_centered",align && !prefs.contains(control.name+"_x"))).bounded()
         }
     }
+    private val portraitLayout=TouchPositions(::portraitDefault).apply{
+        TouchControl.entries.forEach{control->
+            val key="portrait_"+control.name
+            if(prefs.contains(key+"_x"))positions[control]=TouchPlacement(prefs.getFloat(key+"_x",0f),prefs.getFloat(key+"_y",0f),
+                prefs.getBoolean(key+"_visible",control.visibleByDefault),prefs.getFloat(key+"_scale",1f),
+                prefs.getBoolean(key+"_centered",false)).bounded()
+        }
+    }
     var vibration by mutableStateOf(prefs.getBoolean("vibration",false))
     var experimentalClicks by mutableStateOf(prefs.getBoolean("experimental_clicks",false))
     /** No virtual gamepad: taps select, drags steer, two-finger tap goes back. */
@@ -58,10 +81,11 @@ class TouchLayout(context:Context){
             putBoolean("experimental_clicks",experimentalClicks)
             putBoolean("touch_only",touchOnly)
             putInt("layout_revision",1)
-            layout.positions.forEach{(control,pose)->
-                putFloat(control.name+"_x",pose.x);putFloat(control.name+"_y",pose.y)
-                putBoolean(control.name+"_visible",pose.visible)
-                putFloat(control.name+"_scale",pose.scale);putBoolean(control.name+"_centered",pose.centeredRow)
+            for((prefix,positions) in listOf("" to landscapeLayout,"portrait_" to portraitLayout))positions.positions.forEach{(control,pose)->
+                val key=prefix+control.name
+                putFloat(key+"_x",pose.x);putFloat(key+"_y",pose.y)
+                putBoolean(key+"_visible",pose.visible)
+                putFloat(key+"_scale",pose.scale);putBoolean(key+"_centered",pose.centeredRow)
             }
         }.apply()
     }

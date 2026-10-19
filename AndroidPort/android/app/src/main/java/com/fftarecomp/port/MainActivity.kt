@@ -446,6 +446,8 @@ private fun GameScreen(settings:GameSettings,input:GameInput,save:File,onExit:()
     val sound=settings.sound
     val volume=settings.volume
     val touchOnly=settings.touch.touchOnly
+    val portrait=LocalConfiguration.current.let{it.screenHeightDp>it.screenWidthDp}
+    SideEffect{settings.touch.portrait=portrait}
     val touchClicks=settings.touch.experimentalClicks||touchOnly
     val bubbleSize=settings.bubbleSize
     val bubbleLength=settings.bubbleLength

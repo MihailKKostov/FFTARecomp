@@ -23,6 +23,15 @@ class TouchLayoutTest {
         assertFalse(layout.positions.getValue(TouchControl.PAUSE).visible)
         assertFalse(layout.positions.getValue(TouchControl.FAST_HOLD).visible)
     }
+    @Test fun portraitDefaultsKeepGameButtonsInTheLowerScreenAndResetToThemselves(){
+        val layout=TouchPositions(::portraitDefault)
+        for(control in listOf(TouchControl.L,TouchControl.R,TouchControl.A,TouchControl.B,TouchControl.DPAD))
+            assertTrue(control.name,layout.positions.getValue(control).y>=.65f)
+        layout.positions[TouchControl.A]=TouchPlacement(.1f,.1f)
+        layout.reset()
+        assertEquals(portraitDefault(TouchControl.A),layout.positions.getValue(TouchControl.A))
+        assertNotEquals(landscapeDefault(TouchControl.L),portraitDefault(TouchControl.L))
+    }
     @Test fun invalidStoredCoordinatesCannotMakeAControlUnreachable(){
         assertEquals(TouchPlacement(0f,1f),TouchPlacement(Float.NaN,2f).bounded())
     }
