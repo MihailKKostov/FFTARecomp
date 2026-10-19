@@ -1,6 +1,7 @@
 //! Android frontend for the desktop hardware model and C recompiler.
 mod compiler;
-mod engine;
+#[doc(hidden)]
+pub mod engine;
 mod jni;
 
 mod audio;

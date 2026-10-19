@@ -1,0 +1,234 @@
+//! Headless host runner for the Android engine: boots a ROM (and optional
+//! save), plays a scripted input file and writes PNG screenshots composed the
+//! way GameSurface draws them (world texture plus the two native UI layers).
+//!
+//!   cargo run --release -p gba-android --example headless -- \
+//!       --rom ffta.gba [--sav ffta.sav] --script input.txt --out shots \
+//!       [--screen 1080x2400] [--zoom 0] [--touch] [--frames N] [--save-out out.sav]
+//!
+//! Script lines (frame numbers are absolute, '#' starts a comment):
+//!   press <frame> <BUTTON[+BUTTON...]> [frames=6]   BUTTON: A B SELECT START RIGHT LEFT UP DOWN R L
+//!   tap <frame> <x> <y> [back]                       x/y as 0..1 fractions of the screen
+//!   shot <frame> <name>
+//!   end <frame>
+use gba_android::engine::{Engine, KEYS};
+use std::{path::PathBuf, sync::atomic::Ordering};
+
+const BUTTONS: [&str; 10] = ["A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L"];
+
+enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String) }
+
+struct View { extra_x: usize, extra_y: usize, base_width: f32 }
+
+/// Mirrors ViewConfig.create for AspectMode.DEVICE (NativeBridge.kt).
+fn device_view(screen: (u32, u32), zoom: i32) -> View {
+    let ratio = screen.0.max(1) as f64 / screen.1.max(1) as f64;
+    let (width, height) = if ratio >= 1.5 { ((160. * ratio).max(242.).min(1536.), 160.) }
+        else { (256., (256. / ratio).min(800.)) };
+    let limit = (1536. / width).min(800. / height);
+    let max_zoom = ((limit.ln() / 2f64.powf(1. / 6.).ln()).floor() as i32).clamp(0, 6);
+    let scale = 2f64.powf(zoom.clamp(0, max_zoom) as f64 / 6.);
+    View {
+        extra_x: (((width * scale - 240.) / 2.).ceil() as i64).clamp(0, 648) as usize,
+        extra_y: (((height * scale - 160.) / 2.).ceil() as i64).clamp(0, 320) as usize,
+        base_width: (width * 160. / height) as f32,
+    }
+}
+
+fn parse_script(text: &str) -> Result<(Vec<(u64, Event)>, Option<u64>), String> {
+    let mut events = Vec::new();
+    let mut end = None;
+    for (number, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap().trim();
+        if line.is_empty() { continue; }
+        let parts: Vec<_> = line.split_whitespace().collect();
+        let error = || format!("script line {}: {line}", number + 1);
+        let frame: u64 = parts.get(1).and_then(|f| f.parse().ok()).ok_or_else(error)?;
+        match parts[0] {
+            "press" => {
+                let mut mask = 0u16;
+                for name in parts.get(2).ok_or_else(error)?.split('+') {
+                    let bit = BUTTONS.iter().position(|b| b.eq_ignore_ascii_case(name)).ok_or_else(error)?;
+                    mask |= 1 << bit;
+                }
+                let duration = parts.get(3).map_or(Ok(6), |d| d.parse()).map_err(|_| error())?;
+                events.push((frame, Event::Press(mask, duration)));
+            }
+            "tap" => {
+                let x = parts.get(2).and_then(|v| v.parse().ok()).ok_or_else(error)?;
+                let y = parts.get(3).and_then(|v| v.parse().ok()).ok_or_else(error)?;
+                events.push((frame, Event::Tap(x, y, parts.get(4) == Some(&"back"))));
+            }
+            "shot" => events.push((frame, Event::Shot(parts.get(2).ok_or_else(error)?.to_string()))),
+            "end" => end = Some(frame),
+            _ => return Err(error()),
+        }
+    }
+    events.sort_by_key(|e| e.0);
+    Ok((events, end))
+}
+
+/// Composes one presented frame like FrameRenderer.onDrawFrame.
+fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
+    let (sw, sh) = (screen.0 as usize, screen.1 as usize);
+    let mut out = vec![0u8; sw * sh * 3];
+    for pixel in out.chunks_exact_mut(3) { pixel.copy_from_slice(&[6, 9, 8]); }
+    let (ww, wh) = (240 + 2 * view.extra_x, 160 + 2 * view.extra_y);
+    let rect = engine.world_rect;
+    let world_rgb = |x: f32, y: f32, source: &[i32]| -> Option<[u8; 3]> {
+        let u = (x - rect[0]) / rect[2];
+        let v = (y - rect[1]) / rect[3];
+        if !(0. ..1.).contains(&u) || !(0. ..1.).contains(&v) { return None; }
+        let p = source[(v * wh as f32) as usize * ww + (u * ww as f32) as usize] as u32;
+        Some([(p >> 16) as u8, (p >> 8) as u8, p as u8])
+    };
+    for y in 0..sh {
+        for x in 0..sw {
+            if let Some(rgb) = world_rgb(x as f32 + 0.5, y as f32 + 0.5, &engine.pixels) {
+                out[(y * sw + x) * 3..][..3].copy_from_slice(&rgb);
+            }
+        }
+    }
+    let mut packed = vec![0u8; 480 * 160 * 4 * 2];
+    let mut params = [0f32; 18];
+    let mut background = vec![0i32; ww * wh];
+    engine.export_ui(&mut packed, &mut params, &mut background);
+    for layer in 0..2 {
+        let p = &params[layer * 9..layer * 9 + 9];
+        if p[2] <= 0. { continue; }
+        let stats = p[8] > 0.;
+        let (x0, y0) = (p[0].max(p[4]).max(0.) as usize, p[1].max(p[5]).max(0.) as usize);
+        let x1 = ((p[0] + p[2]).min(p[4] + p[6]).min(sw as f32)) as usize;
+        let y1 = ((p[1] + p[3]).min(p[5] + p[7]).min(sh as f32)) as usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let u = ((fx - p[0]) / p[2] * 480.) as usize;
+                let v = ((fy - p[1]) / p[3] * 160.) as usize;
+                let d = &packed[layer * 480 * 160 * 4 + (v.min(159) * 480 + u.min(479)) * 4..][..4];
+                if d[2] == 0 && d[3] == 16 { continue; }
+                let code = d[0] as u32 | (d[1] as u32) << 8;
+                let fg = [code & 31, (code >> 5) & 31, (code >> 10) & 31];
+                let bg = world_rgb(fx, fy, if stats { &background } else { &engine.pixels }).unwrap_or([0; 3]);
+                let pixel = &mut out[(y * sw + x) * 3..][..3];
+                for c in 0..3 {
+                    let lane = if c == 1 { 2 } else { 1 };
+                    let b = (bg[c] as u32 * 31 + 127) / 255;
+                    let value = ((fg[c] * lane * d[2] as u32 + b * lane * d[3] as u32 + 8) / 16).min(31 * lane) / lane;
+                    pixel[c] = (value * 255 / 31) as u8;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn write_png(path: &std::path::Path, width: u32, height: u32, rgb: &[u8]) -> std::io::Result<()> {
+    fn crc(data: &[u8]) -> u32 {
+        let mut c = !0u32;
+        for &b in data { c ^= b as u32; for _ in 0..8 { c = if c & 1 != 0 { 0xedb88320 ^ (c >> 1) } else { c >> 1 }; } }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let start = out.len();
+        out.extend(kind);
+        out.extend(data);
+        let sum = crc(&out[start..]);
+        out.extend(sum.to_be_bytes());
+    }
+    let mut raw = Vec::with_capacity((width as usize * 3 + 1) * height as usize);
+    for row in rgb.chunks_exact(width as usize * 3) { raw.push(0); raw.extend(row); }
+    // zlib stream of stored (uncompressed) deflate blocks.
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<_> = raw.chunks(65535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        z.push((i + 1 == blocks.len()) as u8);
+        z.extend((block.len() as u16).to_le_bytes());
+        z.extend((!(block.len() as u16)).to_le_bytes());
+        z.extend(*block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw { a = (a + byte as u32) % 65521; b = (b + a) % 65521; }
+    z.extend(((b << 16) | a).to_be_bytes());
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = Vec::new();
+    header.extend(width.to_be_bytes());
+    header.extend(height.to_be_bytes());
+    header.extend([8, 2, 0, 0, 0]);
+    chunk(&mut png, b"IHDR", &header);
+    chunk(&mut png, b"IDAT", &z);
+    chunk(&mut png, b"IEND", &[]);
+    std::fs::write(path, png)
+}
+
+fn main() -> Result<(), String> {
+    let mut args = std::env::args().skip(1);
+    let (mut rom, mut sav, mut script, mut out, mut save_out) = (None, None, None, PathBuf::from("shots"), None);
+    let (mut screen, mut zoom, mut touch, mut frames) = ((2400u32, 1080u32), 0, false, None);
+    while let Some(arg) = args.next() {
+        let mut value = || args.next().ok_or(format!("{arg} needs a value"));
+        match arg.as_str() {
+            "--rom" => rom = Some(PathBuf::from(value()?)),
+            "--sav" => sav = Some(PathBuf::from(value()?)),
+            "--script" => script = Some(PathBuf::from(value()?)),
+            "--out" => out = PathBuf::from(value()?),
+            "--save-out" => save_out = Some(PathBuf::from(value()?)),
+            "--screen" => {
+                let v = value()?;
+                let (w, h) = v.split_once('x').ok_or("--screen WIDTHxHEIGHT")?;
+                screen = (w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?);
+            }
+            "--zoom" => zoom = value()?.parse().map_err(|_| "bad zoom")?,
+            "--frames" => frames = Some(value()?.parse::<u64>().map_err(|_| "bad frame count")?),
+            "--touch" => touch = true,
+            _ => return Err(format!("unknown argument {arg}")),
+        }
+    }
+    let rom = std::fs::read(rom.ok_or("--rom is required")?).map_err(|e| format!("read ROM: {e}"))?;
+    if !gba_android::engine::verify_rom(&rom) { return Err("ROM is not the exact FFTA USA/Europe image".into()); }
+    let (events, end) = match &script {
+        Some(path) => parse_script(&std::fs::read_to_string(path).map_err(|e| format!("read script: {e}"))?)?,
+        None => (Vec::new(), None),
+    };
+    let last = frames.or(end).unwrap_or_else(|| events.last().map_or(600, |e| e.0 + 1));
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let mut engine = Engine::new(rom);
+    if let Some(path) = &sav { engine.machine.bus.load_save_data(&std::fs::read(path).map_err(|e| format!("read save: {e}"))?); }
+    engine.save_path = save_out;
+    if std::env::var_os("FFTA_ANDROID_TCC_LIBRARY").is_some() { engine.prepare()?; }
+    let view = device_view(screen, zoom);
+    engine.configure_touch(touch, view.base_width, 1., 1.);
+    engine.ui_window = screen;
+    let (ww, wh) = ((240 + 2 * view.extra_x) as f32, (160 + 2 * view.extra_y) as f32);
+    let scale = (screen.0 as f32 / ww).max(screen.1 as f32 / wh);
+    let (w, h) = ((ww * scale) as i32, (wh * scale) as i32);
+    engine.world_rect = [((screen.0 as i32 - w) / 2) as f32, ((screen.1 as i32 - h) / 2) as f32, w as f32, h as f32];
+    let mut held: Vec<(u16, u64)> = Vec::new();
+    let mut next = 0;
+    let started = std::time::Instant::now();
+    for frame in 0..last {
+        let mut shots = Vec::new();
+        while next < events.len() && events[next].0 <= frame {
+            match &events[next].1 {
+                Event::Press(mask, duration) => held.push((*mask, frame + duration)),
+                Event::Tap(x, y, back) => engine.tap(*x, *y, *back),
+                Event::Shot(name) => shots.push(name.clone()),
+            }
+            next += 1;
+        }
+        held.retain(|h| h.1 > frame);
+        let pressed = held.iter().fold(0u16, |m, h| m | h.0);
+        KEYS.store((!pressed & 0x3ff) as u32, Ordering::Relaxed);
+        engine.frame(1, view.extra_x, view.extra_y, false)?;
+        for name in shots {
+            let path = out.join(format!("{name}.png"));
+            write_png(&path, screen.0, screen.1, &compose(&engine, &view, screen)).map_err(|e| e.to_string())?;
+            println!("frame {frame}: {}", path.display());
+        }
+    }
+    engine.save()?;
+    eprintln!("{last} frames in {:.1}s ({} native dispatches, {} interpreted instructions)",
+        started.elapsed().as_secs_f64(), engine.native_blocks, engine.fallback_steps);
+    Ok(())
+}
