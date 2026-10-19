@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -447,6 +448,15 @@ private fun GameScreen(settings:GameSettings,input:GameInput,save:File,onExit:()
     val volume=settings.volume
     val touchOnly=settings.touch.touchOnly
     val portrait=LocalConfiguration.current.let{it.screenHeightDp>it.screenWidthDp}
+    // Portrait battles dock dialogue and status panels inside the safe area: under the
+    // touch-only bar, and above the on-screen gamepad when it is shown.
+    val density=LocalDensity.current
+    val safeTop=WindowInsets.safeDrawing.getTop(density).toFloat()
+    val safeBottom=WindowInsets.safeDrawing.getBottom(density).toFloat()
+    val gamepadShown=!touchOnly&&settings.touchVisible&&settings.controls
+    val dockTop=safeTop+with(density){(if(touchOnly&&settings.touchVisible)56.dp else 8.dp).toPx()}
+    val dockBottomInset=safeBottom+with(density){8.dp.toPx()}
+    val dockReserve=if(gamepadShown).33f else 0f
     SideEffect{settings.touch.portrait=portrait}
     val touchClicks=settings.touch.experimentalClicks||touchOnly
     val bubbleSize=settings.bubbleSize
@@ -499,6 +509,9 @@ private fun GameScreen(settings:GameSettings,input:GameInput,save:File,onExit:()
         surface?.volume=volume
         surface?.experimentalClicks=touchClicks
         surface?.touchOnly=touchOnly
+        surface?.dockTop=dockTop
+        surface?.dockBottomInset=dockBottomInset
+        surface?.dockReserve=dockReserve
         surface?.bubbleSize=bubbleSize
         surface?.bubbleLength=bubbleLength
     }

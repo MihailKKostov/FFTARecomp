@@ -1,44 +1,43 @@
 //! Shared semantic click targets, with Android screen-space UI composition.
 use gba_core::{ffta_battle_mouse as battle, ffta_dialogue::{self as dialogue,PanelKind}, mem::{self,MemMap}};
-use crate::{engine::Engine,ui_layout::Layout};
+use crate::{engine::Engine,ui_layout::{Band,Layout}};
 
-pub fn layout(bus:&MemMap,width:usize,height:usize,base:f32,index:usize)->Option<Layout>{
+pub fn layout(bus:&MemMap,band:Band,index:usize)->Option<Layout>{
     let state=&bus.ffta_dialogue;
-    let window=(width as u32,height as u32);
     let size=state.style.scale;
     if index==1 {
         if !state.separate || !state.extra.active(){return None;}
         if state.extra.kind==PanelKind::Notice {
-            return Some(Layout::centered_panel(window,base,size,state.extra.bounds?));
+            return Some(Layout::centered_panel(band,size,state.extra.bounds?));
         }
         let b=if state.extra.kind==PanelKind::Actions {dialogue::panel_bounds(&state.extra.pixels,&state.extra.backing)?}
             else{dialogue::pixel_bounds(&state.extra.pixels)?};
-        return Some(Layout::at_corner(window,base,state.town_layout||b[0]+b[2]>=240,b[1]+b[3]>=160,size,state.style.length,b));
+        return Some(Layout::at_corner(band,state.town_layout||b[0]+b[2]>=240,b[1]+b[3]>=160,size,state.style.length,b));
     }
     let (_,right)=state.layer()?;
     if state.action_layout {
-        Some(Layout::at_corner(window,base,false,true,size,state.style.length,dialogue::panel_bounds(&state.pixels,&state.backing)?))
+        Some(Layout::at_corner(band,false,true,size,state.style.length,dialogue::panel_bounds(&state.pixels,&state.backing)?))
     }else if state.shop_layout||state.site_layout {
-        Some(Layout::centered(window,base,size))
+        Some(Layout::centered(band,size))
     }else{
-        Some(Layout::new_with_anchor(window,base,if state.town_layout{true}else{right},size,
+        Some(Layout::new_with_anchor(band,if state.town_layout{true}else{right},size,
             [state.style.offset_x,state.style.offset_y],if state.town_layout{0.}else{state.vertical_anchor()}))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::ui_layout::Layout;
+    use crate::ui_layout::{Band,Layout};
     #[test]
     fn native_panel_keeps_uniform_screen_scale_at_every_world_zoom(){
         for screen in [(720,720),(1920,1080),(2560,720)] {
             for base in [240.,284.,568.] {
                 for size in [0.5,1.,1.5,2.] {
-                    let panel=Layout::new_with_anchor(screen,base,true,size,[0.,0.],160.);
+                    let panel=Layout::new_with_anchor(Band::letterbox(screen,base),true,size,[0.,0.],160.);
                     assert!((panel.rect[2]/480.-panel.rect[3]/160.).abs()<0.0001);
                     for _zoom in 0..=6 {
                         // World texture dimensions are deliberately absent from UI layout.
-                        let at_zoom=Layout::new_with_anchor(screen,base,true,size,[0.,0.],160.);
+                        let at_zoom=Layout::new_with_anchor(Band::letterbox(screen,base),true,size,[0.,0.],160.);
                         assert_eq!(panel.rect,at_zoom.rect);
                     }
                     let bottom=panel.rect[1]+panel.rect[3];
@@ -59,6 +58,14 @@ mod tests {
     }
 }
 impl Engine {
+    /// Portrait battles dock panels to the frame Kotlin reserves; every other
+    /// scene keeps the letterboxed 160-row band that matches the game picture.
+    pub fn ui_band(&self)->Band{
+        match self.ui_dock {
+            Some((top,bottom)) if self.expanded => Band::docked(self.ui_window,self.ui_base,top,bottom),
+            _ => Band::letterbox(self.ui_window,self.ui_base),
+        }
+    }
     pub fn configure_touch(&mut self,enabled:bool,base:f32,size:f32,length:f32){
         if enabled!=self.touch_enabled {
             self.touch_enabled=enabled;
@@ -74,15 +81,15 @@ impl Engine {
     pub fn tap(&mut self,x:f32,y:f32,back:bool){
         if !self.touch_enabled || !x.is_finite() || !y.is_finite() || !(0. ..1.).contains(&x) || !(0. ..1.).contains(&y){return;}
         if back {self.mouse.cancel();battle::back(&mut self.machine.bus);return;}
-        let width=self.ui_window.0 as usize;let height=self.ui_window.1 as usize;
-        let px=x*width as f32;let py=y*height as f32;
+        let px=x*self.ui_window.0 as f32;let py=y*self.ui_window.1 as f32;
+        let band=self.ui_band();
         let state=&self.machine.bus.ffta_dialogue;
         let index=if matches!(state.extra.kind,PanelKind::Actions|PanelKind::Notice)&&state.extra.active(){Some(1)}
             else if state.action_layout||state.town_layout||state.shop_layout {Some(0)}else{None};
         let mut handled=false;
         if (battle::MenuScene::read(&self.machine.bus).is_some()||state.shop_layout)&&index.is_some(){
             let i=index.unwrap();
-            if let Some(source)=layout(&self.machine.bus,width,height,self.ui_base,i).and_then(|l|l.source(px,py)){
+            if let Some(source)=layout(&self.machine.bus,band,i).and_then(|l|l.source(px,py)){
                 let mut nx=(source%480) as f32-120.;let ny=(source/480) as f32;
                 if !(state.town_layout||state.shop_layout||state.site_layout||state.extra.kind==PanelKind::Notice){
                     let bounds=if i==0{dialogue::panel_bounds(&state.pixels,&state.backing)}else{dialogue::panel_bounds(&state.extra.pixels,&state.extra.backing)};
@@ -105,8 +112,10 @@ impl Engine {
     }
     pub fn export_ui(&self,packed:&mut [u8],params:&mut [f32],background:&mut [i32]){
         params.fill(0.);
+        if let Some(flag)=params.get_mut(18){*flag=if self.padded{1.}else{0.};}
+        let band=self.ui_band();
         for i in 0..2 {
-            let Some(layout)=layout(&self.machine.bus,self.ui_window.0 as usize,self.ui_window.1 as usize,self.ui_base,i)else{continue;};
+            let Some(layout)=layout(&self.machine.bus,band,i)else{continue;};
             let state=&self.machine.bus.ffta_dialogue;
             let pixels=if i==0{&state.pixels}else{&state.extra.pixels};
             params[i*9..i*9+4].copy_from_slice(&layout.rect);

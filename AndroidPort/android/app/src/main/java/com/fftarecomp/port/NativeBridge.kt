@@ -61,7 +61,8 @@ object NativeBridge {
     external fun gbaFrame(keys: Int, extraX: Int, extraY: Int, frames: Int,
                           sound: Boolean, audioMode: Int, pixels: ByteBuffer, audio: ShortArray,
                           touch:Boolean,baseWidth:Float,uiSize:Float,uiLength:Float,
-                          screenWidth:Int,screenHeight:Int,fill:Boolean,ui:ByteBuffer,uiParams:FloatArray,uiBackground:ByteBuffer): Int
+                          screenWidth:Int,screenHeight:Int,fill:Boolean,ui:ByteBuffer,uiParams:FloatArray,uiBackground:ByteBuffer,
+                          uiTop:Float,uiBottom:Float): Int
     external fun gbaTap(x:Float,y:Float,back:Boolean)
     external fun gbaUiProfile(enabled:Boolean,reference:Boolean)
     external fun gbaReferenceFrame(reference:Boolean)

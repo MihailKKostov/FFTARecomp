@@ -13,6 +13,12 @@ pub struct Engine {
     pub ui_base: f32,
     pub ui_export_ns: u64,
     pub ui_window: (u32,u32),
+    /// Screen rows (top, bottom) where portrait battles may place UI panels.
+    pub ui_dock: Option<(f32,f32)>,
+    /// The last presented frame showed extended map rows, or only the
+    /// black-padded 240x160 picture.
+    pub expanded: bool,
+    pub padded: bool,
     pub world_rect: [f32;4],
     pub machine: Box<Machine>,
     code: Option<NativeCode>,
@@ -43,10 +49,27 @@ pub fn verify_rom(bytes: &[u8]) -> bool {
         && sha256 == "8fab1e390cb9d5e695bfdb86e81246892e1aa8c0cb4014db8235ff76538ea632")
 }
 impl Engine {
+    /// Screen rectangle of the whole world texture, as GameSurface draws it. A padded
+    /// portrait/square frame shows only its 240x160 picture, fitted to the screen width,
+    /// so the texture rectangle is placed to line that picture up.
+    pub fn set_view(&mut self,screen:(u32,u32),extra_x:usize,extra_y:usize,fill:bool){
+        let (sw,sh)=(screen.0 as f32,screen.1 as f32);
+        let (ww,wh)=((240+extra_x*2) as f32,(160+extra_y*2) as f32);
+        self.ui_window=screen;
+        if self.padded && extra_y>0 && extra_x<=8 {
+            let s=(sw/240.).min(sh/160.);
+            let (bx,by)=(((sw-240.*s)/2.).trunc(),((sh-160.*s)/2.).trunc());
+            self.world_rect=[bx-extra_x as f32*s,by-extra_y as f32*s,ww*s,wh*s];
+            return;
+        }
+        let scale=if fill{(sw/ww).max(sh/wh)}else{(sw/ww).min(sh/wh)};
+        let (width,height)=((ww*scale) as i32,(wh*scale) as i32);
+        self.world_rect=[((screen.0 as i32-width)/2) as f32,((screen.1 as i32-height)/2) as f32,width as f32,height as f32];
+    }
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,expanded:false,padded:false,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -164,6 +187,8 @@ impl Engine {
             && (0..4).any(|bg|gba_core::ppu::ffta_terrain(&self.machine.bus,bg)
                 || gba_core::ffta_stage::layer(&self.machine.bus,bg).is_some());
         let padded=mem::extra_y()>0 && !expanded_rows;
+        self.expanded=expanded_rows;
+        self.padded=padded;
         if padded { self.pixels.fill(0xff000000u32 as i32); }
         let source = if mem::extra() == 0 && mem::extra_y() == 0 {
             &self.machine.bus.framebuffer[..]

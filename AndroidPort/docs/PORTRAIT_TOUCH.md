@@ -20,6 +20,22 @@ repository root is not changed; only `AndroidPort/` is.
 - **Orientation** (Video & zoom): Landscape (default), Portrait, Auto-rotate.
   Portrait always uses the full-screen Device view (256 wide, up to 800 tall).
 
+## Done (0.27-android-preview)
+
+- **Save export/import.** Start screen: Export save / Import save; pause menu:
+  Export save. Import keeps `ffta.sav.bak` and reloads a loaded game.
+- **Fast forward draws only the frame it shows** (`MemMap::skip_render`).
+  Snowball battle, portrait, 4x, host native code: 49.4 -> 23.7 ms per 4-frame
+  batch; all 11500 presented frames hash-identical with skipping on and off.
+- **Separate portrait touch layout** with defaults in the lower screen.
+- **Portrait battles dock UI panels** to a frame from the top safe area (below
+  the touch-only bar) to above the gamepad (33% reserved) or the bottom inset
+  (`ui_layout::Band::docked`, `Engine::ui_band`). Other scenes keep the band.
+- **Padded scenes in portrait/square** (world map, menus, title) show only the
+  240x160 picture fitted to the screen width over a blurred, dimmed copy of it;
+  the 8 wrapped side columns are dropped. `Engine::set_view` maps taps to the
+  same rectangle GameSurface draws.
+
 ## Measured with the headless runner (USA ROM, new game, 1080x2400)
 
 - Opening scene and the snowball-fight battle render the extended map above
@@ -39,8 +55,7 @@ repository root is not changed; only `AndroidPort/` is.
 ## Next
 
 1. Tap adapters for the title menu, then other unsupported screens.
-2. Portrait battle layout: dock dialogue and stats panels to the bottom of
-   the screen instead of the middle 240x160 band (`ui_layout.rs`, `touch.rs`).
+2. World map in portrait: extend the map vertically like battles (needs a save).
 3. Drag on the battle map pans the game's camera instead of moving the cursor
    (needs the camera variables reverse-engineered).
 4. World map and towns: extend or frame them for portrait.

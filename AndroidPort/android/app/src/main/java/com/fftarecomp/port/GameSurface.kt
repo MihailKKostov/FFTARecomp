@@ -32,6 +32,10 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
     @Volatile var touchOnly=false
     /** Receives the held GBA direction while a touch-only drag steers. */
     @Volatile var onDirection:(Int)->Unit={}
+    /** Portrait battles: screen rows reserved above (px) and below (fraction of height, px inset) the UI frame. */
+    @Volatile var dockTop=0f
+    @Volatile var dockReserve=0f
+    @Volatile var dockBottomInset=0f
     @Volatile var bubbleSize=1f
     @Volatile var bubbleLength=1f
     private val taps=java.util.concurrent.ConcurrentLinkedQueue<ScreenTap>()
@@ -187,7 +191,9 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                 val samples = NativeBridge.gbaFrame(benchmark?.keys() ?: (inputSource.get().inv() and 0x3ff),
                     config.extraX, config.extraY, multiplier, sound, if(mode==FastAudio.NORMAL)2 else 1, back, sampleBuffer,
                     experimentalClicks,base.width*160f/base.height,bubbleSize,bubbleLength,
-                    frames.screenWidth,frames.screenHeight,config.fillScreen,uiBack.pixels,uiBack.params,uiBack.background)
+                    frames.screenWidth,frames.screenHeight,config.fillScreen,uiBack.pixels,uiBack.params,uiBack.background,
+                    dockTop,if(frames.screenHeight>frames.screenWidth)
+                        frames.screenHeight-maxOf(dockBottomInset,dockReserve*frames.screenHeight) else 0f)
                 val frameNanos=System.nanoTime()-start
                 simulationNanos += frameNanos
                 if (samples < 0) throw IllegalStateException(NativeBridge.gbaStatus())
@@ -258,7 +264,7 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
 
 private class UiBuffers(bytes:Int){
     val pixels:ByteBuffer=ByteBuffer.allocateDirect(480*160*4*2).order(ByteOrder.nativeOrder())
-    val params=FloatArray(18)
+    val params=FloatArray(20)
     var background:ByteBuffer=ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
         private set
     fun resize(bytes:Int){if(background.capacity()!=bytes)background=ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())}
@@ -270,7 +276,7 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
     private data class PublishedFrame(val pixels:ByteBuffer,val view:ViewConfig,val ui:UiBuffers)
     private val mailbox=FrameMailbox<PublishedFrame>()
     private var uploadedView:ViewConfig?=null
-    private val uploadedUiParams=FloatArray(18)
+    private val uploadedUiParams=FloatArray(20)
     @Volatile var screenWidth = 2280
         private set
     @Volatile var screenHeight = 1080
@@ -282,6 +288,8 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
     private var position = 0
     private var coordinates = 0
     private var uiProgram=0
+    private var backdropProgram=0
+    private val bandUv=ByteBuffer.allocateDirect(8*4).order(ByteOrder.nativeOrder()).asFloatBuffer()
     private var uiPosition=0
     private var uiCoordinates=0
     private val uiTextures=IntArray(3)
@@ -353,6 +361,19 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
                 if(i<2)glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,480,160,0,GL_RGBA,GL_UNSIGNED_BYTE,null)
             }
             bgWidth=0;bgHeight=0
+            // Padded scenes: a blurred, dimmed copy of the 240x160 picture fills the bars.
+            backdropProgram=glCreateProgram()
+            glAttachShader(backdropProgram,shader(GL_VERTEX_SHADER,
+                "attribute vec2 position; attribute vec2 uv; varying vec2 tex; void main(){ gl_Position=vec4(position,0.0,1.0);tex=uv; }"))
+            glAttachShader(backdropProgram,shader(GL_FRAGMENT_SHADER,"""
+                precision mediump float; varying vec2 tex; uniform sampler2D image; uniform vec4 region; uniform vec2 texel;
+                void main(){vec2 p=region.xy+tex*region.zw;vec3 c=vec3(0.);
+                  for(int i=-1;i<=1;i++)for(int j=-1;j<=1;j++)c+=texture2D(image,p+vec2(float(i),float(j))*texel).bgr;
+                  gl_FragColor=vec4(c*(0.34/9.)+vec3(0.012,0.018,0.016),1.);}
+            """.trimIndent()))
+            glLinkProgram(backdropProgram)
+            glGetProgramiv(backdropProgram,GL_LINK_STATUS,linked,0)
+            check(linked[0]!=0){glGetProgramInfoLog(backdropProgram)}
         } catch (error: Throwable) { onError("OpenGL: ${error.message}") }
     }
 
@@ -401,21 +422,62 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
         val uiParams=uploadedUiParams
         val scale = if(view.fillScreen)maxOf(screenWidth.toFloat()/view.width, screenHeight.toFloat()/view.height)
             else minOf(screenWidth.toFloat()/view.width, screenHeight.toFloat()/view.height)
-        val width = (view.width*scale).toInt(); val height=(view.height*scale).toInt()
-        glViewport((screenWidth-width)/2,(screenHeight-height)/2,width,height)
+        var width = (view.width*scale).toInt(); var height=(view.height*scale).toInt()
+        var left=(screenWidth-width)/2; var bottom=(screenHeight-height)/2
         glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,texture)
+        val padded=uiParams[18]>0f && view.extraY>0 && backdropProgram!=0
+        // Portrait/square views extend only 8 columns, which hold wrapped map leftovers outside
+        // battles; wider landscape views keep their real widescreen columns.
+        val cropX=view.extraX<=8
+        val bandX=if(cropX)view.extraX else 0; val bandW=if(cropX)240 else view.width
+        if(padded&&cropX){
+            // Fit the 240x160 picture itself to the screen; Engine::set_view maps taps the same way.
+            val fit=minOf(screenWidth/240f,screenHeight/160f)
+            val bandLeft=((screenWidth-240*fit)/2).toInt(); val bandBottom=((screenHeight-160*fit)/2).toInt()
+            width=(view.width*fit).toInt(); height=(view.height*fit).toInt()
+            left=bandLeft-(view.extraX*fit).toInt(); bottom=bandBottom-(view.extraY*fit).toInt()
+        }
+        val bandScale=if(padded&&cropX)minOf(screenWidth/240f,screenHeight/160f) else scale
+        val u0=bandX.toFloat()/view.width; val u1=(bandX+bandW).toFloat()/view.width
+        val v0=view.extraY.toFloat()/view.height; val v1=(view.extraY+160f)/view.height
+        if(padded){
+            // Cover the screen with the band's central part, linearly filtered and blurred.
+            val aspect=screenWidth.toFloat()/screenHeight
+            val bandWidth=if(aspect<1.5f)240f*aspect/1.5f else 240f
+            val bandHeight=if(aspect<1.5f)160f else 240f/aspect
+            glViewport(0,0,screenWidth,screenHeight)
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR)
+            glUseProgram(backdropProgram)
+            glUniform1i(glGetUniformLocation(backdropProgram,"image"),0)
+            glUniform4f(glGetUniformLocation(backdropProgram,"region"),
+                (view.extraX+(240f-bandWidth)/2)/view.width,(view.extraY+(160f-bandHeight)/2)/view.height,
+                bandWidth/view.width,bandHeight/view.height)
+            glUniform2f(glGetUniformLocation(backdropProgram,"texel"),4f/view.width,4f/view.height)
+            val bp=glGetAttribLocation(backdropProgram,"position");val bc=glGetAttribLocation(backdropProgram,"uv")
+            glEnableVertexAttribArray(bp);glEnableVertexAttribArray(bc)
+            vertices.position(0);uv.position(0)
+            glVertexAttribPointer(bp,2,GL_FLOAT,false,0,vertices)
+            glVertexAttribPointer(bc,2,GL_FLOAT,false,0,uv)
+            glDrawArrays(GL_TRIANGLE_STRIP,0,4)
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST)
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST)
+            // Then only the native 240x160 picture, without the padding rows or wrapped side columns.
+            glViewport(left+(bandX*bandScale).toInt(),bottom+(view.extraY*bandScale).toInt(),(bandW*bandScale).toInt(),(160*bandScale).toInt())
+            bandUv.position(0);bandUv.put(floatArrayOf(u0,v1, u1,v1, u0,v0, u1,v0));bandUv.position(0)
+        }else glViewport(left,bottom,width,height)
         glUseProgram(program); glUniform1i(glGetUniformLocation(program,"image"),0)
         glEnableVertexAttribArray(position); glEnableVertexAttribArray(coordinates)
         vertices.position(0); uv.position(0)
         glVertexAttribPointer(position,2,GL_FLOAT,false,0,vertices)
-        glVertexAttribPointer(coordinates,2,GL_FLOAT,false,0,uv)
+        glVertexAttribPointer(coordinates,2,GL_FLOAT,false,0,if(padded)bandUv else uv)
         glDrawArrays(GL_TRIANGLE_STRIP,0,4)
         if(uiProgram!=0){
             glViewport(0,0,screenWidth,screenHeight)
             glUseProgram(uiProgram)
             glUniform2f(glGetUniformLocation(uiProgram,"screen"),screenWidth.toFloat(),screenHeight.toFloat())
-            glUniform4f(glGetUniformLocation(uiProgram,"worldRect"),((screenWidth-width)/2).toFloat(),
-                ((screenHeight-height)/2).toFloat(),width.toFloat(),height.toFloat())
+            glUniform4f(glGetUniformLocation(uiProgram,"worldRect"),left.toFloat(),
+                (screenHeight-bottom-height).toFloat(),width.toFloat(),height.toFloat())
             glUniform1i(glGetUniformLocation(uiProgram,"world"),0)
             glUniform1i(glGetUniformLocation(uiProgram,"panel"),1)
             glEnableVertexAttribArray(uiPosition);glEnableVertexAttribArray(uiCoordinates)

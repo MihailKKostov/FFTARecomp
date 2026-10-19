@@ -5,7 +5,7 @@
 //!   cargo run --release -p gba-android --example headless -- \
 //!       --rom ffta.gba [--sav ffta.sav] --script input.txt --out shots \
 //!       [--screen 1080x2400] [--zoom 0] [--touch] [--frames N] [--save-out out.sav]
-//!       [--speed N] [--no-skip] [--hashes hashes.txt]
+//!       [--speed N] [--no-skip] [--hashes hashes.txt] [--dock TOP:BOTTOM]
 //!
 //! --speed runs N frames per engine call like fast forward (events and shots
 //! land on batch boundaries); --no-skip draws hidden frames too; --hashes
@@ -82,6 +82,31 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
     for pixel in out.chunks_exact_mut(3) { pixel.copy_from_slice(&[6, 9, 8]); }
     let (ww, wh) = (240 + 2 * view.extra_x, 160 + 2 * view.extra_y);
     let rect = engine.world_rect;
+    // Padded scenes: blurred, dimmed band behind; only the band itself is drawn on top.
+    let padded = engine.padded && view.extra_y > 0;
+    let crop_x = view.extra_x <= 8;
+    let (band_x, band_w) = if crop_x { (view.extra_x, 240) } else { (0, ww) };
+    if padded {
+        let aspect = sw as f32 / sh as f32;
+        let (bw, bh) = if aspect < 1.5 { (240. * aspect / 1.5, 160.) } else { (240., 240. / aspect) };
+        let (ox, oy) = (view.extra_x as f32 + (240. - bw) / 2., view.extra_y as f32 + (160. - bh) / 2.);
+        for y in 0..sh {
+            for x in 0..sw {
+                let (tx, ty) = (ox + (x as f32 + 0.5) / sw as f32 * bw, oy + (y as f32 + 0.5) / sh as f32 * bh);
+                let mut c = [0u32; 3];
+                for dy in [-4i32, 0, 4] {
+                    for dx in [-4i32, 0, 4] {
+                        let sx = (tx as i32 + dx).clamp(0, ww as i32 - 1) as usize;
+                        let syy = (ty as i32 + dy).clamp(0, wh as i32 - 1) as usize;
+                        let p = engine.pixels[syy * ww + sx] as u32;
+                        c[0] += (p >> 16) & 255; c[1] += (p >> 8) & 255; c[2] += p & 255;
+                    }
+                }
+                let o = &mut out[(y * sw + x) * 3..][..3];
+                for i in 0..3 { o[i] = (c[i] as f32 / 9. * 0.34 + [3., 4.6, 4.][i]) as u8; }
+            }
+        }
+    }
     let world_rgb = |x: f32, y: f32, source: &[i32]| -> Option<[u8; 3]> {
         let u = (x - rect[0]) / rect[2];
         let v = (y - rect[1]) / rect[3];
@@ -91,13 +116,19 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
     };
     for y in 0..sh {
         for x in 0..sw {
+            if padded {
+                let u = ((x as f32 + 0.5 - rect[0]) / rect[2] * ww as f32) as isize;
+                let v = ((y as f32 + 0.5 - rect[1]) / rect[3] * wh as f32) as isize;
+                if u < band_x as isize || u >= (band_x + band_w) as isize
+                    || v < view.extra_y as isize || v >= (view.extra_y + 160) as isize { continue; }
+            }
             if let Some(rgb) = world_rgb(x as f32 + 0.5, y as f32 + 0.5, &engine.pixels) {
                 out[(y * sw + x) * 3..][..3].copy_from_slice(&rgb);
             }
         }
     }
     let mut packed = vec![0u8; 480 * 160 * 4 * 2];
-    let mut params = [0f32; 18];
+    let mut params = [0f32; 20];
     let mut background = vec![0i32; ww * wh];
     engine.export_ui(&mut packed, &mut params, &mut background);
     if std::env::var_os("FFTA_UI_DEBUG").is_some() {
@@ -180,6 +211,7 @@ fn main() -> Result<(), String> {
     let (mut rom, mut sav, mut script, mut out, mut save_out) = (None, None, None, PathBuf::from("shots"), None);
     let (mut screen, mut zoom, mut touch, mut frames) = ((2400u32, 1080u32), 0, false, None);
     let (mut speed, mut skip, mut hashes) = (1u64, true, None);
+    let mut dock = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -199,6 +231,11 @@ fn main() -> Result<(), String> {
             "--speed" => speed = value()?.parse::<u64>().map_err(|_| "bad speed")?.clamp(1, 8),
             "--no-skip" => skip = false,
             "--hashes" => hashes = Some(PathBuf::from(value()?)),
+            "--dock" => {
+                let v = value()?;
+                let (t, b) = v.split_once(':').ok_or("--dock TOP:BOTTOM in screen pixels")?;
+                dock = Some((t.parse().map_err(|_| "bad dock top")?, b.parse().map_err(|_| "bad dock bottom")?));
+            }
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
@@ -224,24 +261,25 @@ fn main() -> Result<(), String> {
     }
     let view = device_view(screen, zoom);
     engine.configure_touch(touch, view.base_width, 1., 1.);
-    engine.ui_window = screen;
-    let (ww, wh) = ((240 + 2 * view.extra_x) as f32, (160 + 2 * view.extra_y) as f32);
-    let scale = (screen.0 as f32 / ww).max(screen.1 as f32 / wh);
-    let (w, h) = ((ww * scale) as i32, (wh * scale) as i32);
-    engine.world_rect = [((screen.0 as i32 - w) / 2) as f32, ((screen.1 as i32 - h) / 2) as f32, w as f32, h as f32];
+    engine.ui_dock = dock;
+    engine.set_view(screen, view.extra_x, view.extra_y, true);
     let mut held: Vec<(u16, u64)> = Vec::new();
     let mut next = 0;
     let started = std::time::Instant::now();
     let mut frame = 0;
     while frame < last {
         let mut shots = Vec::new();
-        // A speed change applies from the batch that starts at or after its frame.
-        while next < events.len() && events[next].0 <= frame {
-            if let Event::Speed(n) = events[next].1 { speed = n; }
-            next += 1;
-        }
+        engine.set_view(screen, view.extra_x, view.extra_y, true);
+        // Events due before this batch ends run now; a speed change applies from
+        // the batch that starts at or after its frame, so it ends the scan early.
         let mut pending = next;
-        while pending < events.len() && events[pending].0 < frame + speed && !matches!(events[pending].1, Event::Speed(_)) { pending += 1; }
+        while pending < events.len() && events[pending].0 < frame + speed {
+            if let Event::Speed(n) = events[pending].1 {
+                if events[pending].0 > frame { break; }
+                speed = n;
+            }
+            pending += 1;
+        }
         for index in std::mem::replace(&mut next, pending)..pending {
             match &events[index].1 {
                 Event::Press(mask, duration) => held.push((*mask, frame + duration)),
@@ -259,6 +297,7 @@ fn main() -> Result<(), String> {
             let hash = engine.pixels.iter().fold(0xcbf29ce484222325u64, |h, p| (h ^ *p as u32 as u64).wrapping_mul(0x100000001b3));
             hash_log += &format!("{} {hash:016x} {}\n", frame + speed - 1, engine.frame_ns);
         }
+        if !shots.is_empty() { engine.set_view(screen, view.extra_x, view.extra_y, true); }
         for name in shots {
             let path = out.join(format!("{name}.png"));
             write_png(&path, screen.0, screen.1, &compose(&engine, &view, screen)).map_err(|e| e.to_string())?;

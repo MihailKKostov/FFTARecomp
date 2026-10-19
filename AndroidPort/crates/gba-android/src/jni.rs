@@ -69,6 +69,7 @@ pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaFrame(
     frames: jint, sound: jboolean, audio_mode:jint, pixels: jobject, audio: jshortArray,
     touch:jboolean, base_width:jfloat, ui_size:jfloat, ui_length:jfloat,
     screen_width:jint,screen_height:jint,fill:jboolean,ui:jobject,ui_params:jfloatArray,ui_background:jobject,
+    ui_top:jfloat,ui_bottom:jfloat,
 ) -> jint {
     guarded(|| {
         if pixels.is_null() || audio.is_null() { return Err("Missing frame buffers".into()); }
@@ -87,29 +88,25 @@ pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaFrame(
         let engine = lock.as_mut().ok_or("ROM not loaded")?;
         engine.configure_touch(touch!=0,base_width,ui_size,ui_length);
         if screen_width<=0 || screen_height<=0 {return Err("Invalid screen size".into());}
-        engine.ui_window=(screen_width as u32,screen_height as u32);
-        let sx=screen_width as f32/(240+extra_x*2) as f32;
-        let sy=screen_height as f32/(160+extra_y*2) as f32;
-        let scale=if fill!=0{sx.max(sy)}else{sx.min(sy)};
-        let width=((240+extra_x*2) as f32*scale) as i32;
-        let height=((160+extra_y*2) as f32*scale) as i32;
-        engine.world_rect=[((screen_width-width)/2) as f32,((screen_height-height)/2) as f32,width as f32,height as f32];
+        engine.ui_dock=(ui_top.is_finite()&&ui_bottom.is_finite()&&ui_bottom>ui_top).then_some((ui_top,ui_bottom));
+        // Taps arrive between frames, so they map through the frame the player saw last.
+        engine.set_view((screen_width as u32,screen_height as u32),extra_x as usize,extra_y as usize,fill!=0);
         engine.frame_audio(frames as usize, extra_x as usize, extra_y as usize,
             if sound==0{0}else if audio_mode==2{2}else{1})?;
         std::ptr::copy_nonoverlapping(engine.pixels.as_ptr(),target,size as usize);
         if ui.is_null() || ui_background.is_null() || ui_params.is_null()
             || api.GetDirectBufferCapacity.unwrap()(env,ui)<(480*160*4*2) as i64
             || api.GetDirectBufferCapacity.unwrap()(env,ui_background)<size as i64*4
-            || api.GetArrayLength.unwrap()(env,ui_params)<18 {return Err("Invalid UI buffers".into());}
+            || api.GetArrayLength.unwrap()(env,ui_params)<20 {return Err("Invalid UI buffers".into());}
         let ui_ptr=api.GetDirectBufferAddress.unwrap()(env,ui) as *mut u8;
         let bg_ptr=api.GetDirectBufferAddress.unwrap()(env,ui_background) as *mut i32;
         if ui_ptr.is_null()||bg_ptr.is_null(){return Err("Expected direct UI buffers".into());}
-        let mut params=[0f32;18];
+        let mut params=[0f32;20];
         let ui_start=engine.machine.bus.ffta_dialogue.profile.enabled.then(std::time::Instant::now);
         engine.export_ui(std::slice::from_raw_parts_mut(ui_ptr,480*160*4*2),&mut params,
             std::slice::from_raw_parts_mut(bg_ptr,size as usize));
         if let Some(start)=ui_start {engine.ui_export_ns=start.elapsed().as_nanos() as u64;}
-        api.SetFloatArrayRegion.unwrap()(env,ui_params,0,18,params.as_ptr());
+        api.SetFloatArrayRegion.unwrap()(env,ui_params,0,20,params.as_ptr());
         let count = engine.audio.len().min(4096) as i32;
         if count > 0 { api.SetShortArrayRegion.unwrap()(env,audio,0,count,engine.audio.as_ptr()); }
         if api.ExceptionCheck.unwrap()(env) != 0 { return Err("Cannot copy frame data".into()); }
