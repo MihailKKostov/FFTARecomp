@@ -39,6 +39,8 @@ pub struct Engine {
     pub cache_dir: Option<PathBuf>,
     pub cache_hit: bool,
     rom_cache_key: String,
+    /// USA image: RAM addresses measured on it (title taps) apply.
+    pub usa: bool,
 }
 pub fn verify_rom(bytes: &[u8]) -> bool {
     let sha1=format!("{:x}", Sha1::digest(bytes));
@@ -73,7 +75,7 @@ impl Engine {
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
-            rom_cache_key }
+            usa: rom_cache_key==gba_core::ffta_rom::SHA256, rom_cache_key }
     }
     pub fn prepare(&mut self) -> Result<(), String> {
         let start = Instant::now();

@@ -35,6 +35,11 @@ repository root is not changed; only `AndroidPort/` is.
   240x160 picture fitted to the screen width over a blurred, dimmed copy of it;
   the 8 wrapped side columns are dropped. `Engine::set_view` maps taps to the
   same rectangle GameSurface draws.
+- **Title screen taps (USA).** A tap on "Push START" presses Start; on the
+  New Game / Saved Game / Color Mode menu a tap moves to the tapped row with
+  the game's own Up/Down and presses A; taps between rows do nothing
+  (`title_touch.rs`, RAM addresses documented there). Measured: tapping
+  Saved Game opens the Resume Battle / Load menu.
 
 ## Measured with the headless runner (USA ROM, new game, 1080x2400)
 
@@ -43,8 +48,7 @@ repository root is not changed; only `AndroidPort/` is.
 - The battle stats panel is a detached UI layer and appears complete once
   its slide-in animation ends. Frames captured mid-slide show it clipped in
   every aspect, including on the hardware frame; that is not a portrait bug.
-- Title screen and the New Game / Saved Game menu have no tap adapter: a tap
-  is sent as A, so it confirms the highlighted row, not the tapped row.
+- (0.26) Title menu taps confirmed the highlighted row; fixed in 0.27.
 
 ## Not measured
 
@@ -54,7 +58,8 @@ repository root is not changed; only `AndroidPort/` is.
 
 ## Next
 
-1. Tap adapters for the title menu, then other unsupported screens.
+1. Tap adapters for the Resume Battle / Load menu and save slots, then other
+   unsupported screens (needs the user's save).
 2. World map in portrait: extend the map vertically like battles (needs a save).
 3. Drag on the battle map pans the game's camera instead of moving the cursor
    (needs the camera variables reverse-engineered).

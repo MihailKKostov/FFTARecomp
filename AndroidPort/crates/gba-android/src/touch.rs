@@ -103,6 +103,13 @@ impl Engine {
         }else{
             let nx=(px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32-mem::extra() as f32;
             let ny=(py-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32-mem::extra_y() as f32;
+            if let Some(keys)=self.usa.then(||crate::title_touch::keys(&self.machine.bus,nx,ny)).flatten(){
+                self.mouse.cancel();
+                if !keys.is_empty(){battle::press_sequence(&mut self.machine.bus,&keys);}
+                #[cfg(target_os="android")]
+                eprintln!("FFTA_TOUCH title x={nx:.1} y={ny:.1} keys={keys:x?}");
+                return;
+            }
             handled=if self.mouse.scene(&self.machine.bus).is_some(){self.mouse.aim(&self.machine.bus,nx,ny,true)}
                 else{battle::aim(&mut self.machine.bus,nx,ny,true)};
         }

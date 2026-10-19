@@ -16,13 +16,14 @@
 //!   tap <frame> <x> <y> [back]                       x/y as 0..1 fractions of the screen
 //!   shot <frame> <name>
 //!   speed <frame> <N>                                frames per engine call from then on (1-8)
+//!   dump <frame> <name>                              writes <out>/<name>.ewram and .iwram
 //!   end <frame>
 use gba_android::engine::{Engine, KEYS};
 use std::{path::PathBuf, sync::atomic::Ordering};
 
 const BUTTONS: [&str; 10] = ["A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L"];
 
-enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String), Speed(u64) }
+enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String), Speed(u64), Dump(String) }
 
 struct View { extra_x: usize, extra_y: usize, base_width: f32 }
 
@@ -66,6 +67,7 @@ fn parse_script(text: &str) -> Result<(Vec<(u64, Event)>, Option<u64>), String> 
                 events.push((frame, Event::Tap(x, y, parts.get(4) == Some(&"back"))));
             }
             "shot" => events.push((frame, Event::Shot(parts.get(2).ok_or_else(error)?.to_string()))),
+            "dump" => events.push((frame, Event::Dump(parts.get(2).ok_or_else(error)?.to_string()))),
             "speed" => events.push((frame, Event::Speed(parts.get(2).and_then(|v| v.parse::<u64>().ok()).ok_or_else(error)?.clamp(1, 8)))),
             "end" => end = Some(frame),
             _ => return Err(error()),
@@ -269,6 +271,7 @@ fn main() -> Result<(), String> {
     let mut frame = 0;
     while frame < last {
         let mut shots = Vec::new();
+        let mut dumps = Vec::new();
         engine.set_view(screen, view.extra_x, view.extra_y, true);
         // Events due before this batch ends run now; a speed change applies from
         // the batch that starts at or after its frame, so it ends the scan early.
@@ -286,6 +289,7 @@ fn main() -> Result<(), String> {
                 Event::Tap(x, y, back) => engine.tap(*x, *y, *back),
                 Event::Shot(name) => shots.push(name.clone()),
                 Event::Speed(_) => {}
+                Event::Dump(name) => dumps.push(name.clone()),
             }
         }
         held.retain(|h| h.1 > frame);
@@ -296,6 +300,10 @@ fn main() -> Result<(), String> {
         if hashes.is_some() {
             let hash = engine.pixels.iter().fold(0xcbf29ce484222325u64, |h, p| (h ^ *p as u32 as u64).wrapping_mul(0x100000001b3));
             hash_log += &format!("{} {hash:016x} {}\n", frame + speed - 1, engine.frame_ns);
+        }
+        for name in dumps {
+            std::fs::write(out.join(format!("{name}.ewram")), &engine.machine.bus.ewram).map_err(|e| e.to_string())?;
+            std::fs::write(out.join(format!("{name}.iwram")), &engine.machine.bus.iwram).map_err(|e| e.to_string())?;
         }
         if !shots.is_empty() { engine.set_view(screen, view.extra_x, view.extra_y, true); }
         for name in shots {

@@ -8,4 +8,5 @@ mod audio;
 mod normal_audio;
 mod ui_layout;
 mod touch;
+mod title_touch;
 mod scheduling;
