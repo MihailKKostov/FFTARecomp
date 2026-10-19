@@ -126,6 +126,16 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+**World map Menu button (0.33).** Touch-only portrait: a Menu button (Start)
+in the bottom HUD row between Clan Funds (native x 3-77) and the date
+(152-240), where the HUD is pinned below the map (`Engine::map_menu_button`,
+`MapMenuButton`). Shown only while the map waits for input: hidden while a
+menu or list is open (BG2/BG3 drawing in rows 32-128, `world_hud.menu`;
+Start does not close the game's menu) and during fades (the game fades by
+rewriting the palette, so the HUD's brightness must be unchanged for 8
+frames; BLDY fades too). Landscape keeps Start on the touch-only bar (the
+same spot lies over the map there).
+
 **Portrait Party screens (0.32).** Roster, unit status, Equip/Items, Pick
 Abilities, Change Jobs and the roster's Item List (gba-core `menu_screen.rs`,
 gba-android `menu_layout.rs`):

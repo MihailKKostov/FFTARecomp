@@ -433,6 +433,7 @@ private fun GameScreen(settings:GameSettings,input:GameInput,save:File,onExit:()
     val activity=context as AppCompatActivity
     val lifecycle=activity.lifecycle
     var surface by remember {mutableStateOf<GameSurface?>(null)}
+    var mapMenu by remember {mutableStateOf<List<Float>?>(null)}
     var paused by remember {mutableStateOf(false)}
     var editingTouch by remember {mutableStateOf(false)}
     var originalTouch by remember {mutableStateOf<Map<TouchControl,TouchPlacement>>(emptyMap())}
@@ -518,7 +519,10 @@ private fun GameScreen(settings:GameSettings,input:GameInput,save:File,onExit:()
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(factory={ctx->GameSurface(ctx){error->
             activity.runOnUiThread{failure=error;paused=true}
-        }.also{surface=it;it.inputSource=input.buttons;it.onDirection={mask->input.set("drag",mask)}}},modifier=Modifier.fillMaxSize())
+        }.also{surface=it;it.inputSource=input.buttons;it.onDirection={mask->input.set("drag",mask)}
+            it.onMenuButton={rect->activity.runOnUiThread{mapMenu=rect}}}},modifier=Modifier.fillMaxSize())
+        val menuRect=mapMenu
+        if(touchOnly&&!paused&&!editingTouch&&menuRect!=null)MapMenuButton(menuRect,settings,input)
         if(touchOnly&&settings.touchVisible&&!paused&&!editingTouch)TouchOnlyBar(settings,input,
             onPause={paused=true;page="main";input.clear();settings.pad.clear();settings.holdFast=false})
         else if((settings.touchVisible&&!paused)||editingTouch)TouchOverlay(settings,input,editingTouch,

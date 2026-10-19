@@ -503,7 +503,10 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
             let mut hud=crate::world_hud::TRANSPARENT;
             let in_box=crate::world_hud::in_hud_box(x as i32,line as i32);
             for bg in [2,3] {
-                if !in_box {continue;}
+                if !in_box {
+                    if (32..128).contains(&line) && bg_used[bg] && bg_lines[bg][wx]!=TRANSPARENT {mem.world_hud.menu=true;}
+                    continue;
+                }
                 if bg_used[bg] && bg_lines[bg][wx]!=TRANSPARENT {
                     if hud==crate::world_hud::TRANSPARENT {hud=bg_lines[bg][wx];}
                     bg_lines[bg][wx]=TRANSPARENT;

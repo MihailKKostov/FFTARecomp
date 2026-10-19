@@ -21,6 +21,8 @@ pub struct WorldHud {
     pub map_frame: bool,
     /// 240x160 RGB555 HUD picture, TRANSPARENT where empty.
     pub pixels: Vec<u16>,
+    /// BG2/BG3 draw between rows 32 and 128 this frame: a menu or list is open.
+    pub menu: bool,
     boxes: Vec<[i32; 4]>,
 }
 
@@ -43,6 +45,7 @@ pub fn hud_object(a0: u16, a2: u16) -> bool {
 pub fn begin_frame(mem: &mut MemMap, world_map: bool) {
     let hud = &mut mem.world_hud;
     hud.map_frame = hud.enabled && world_map && crate::mem::extra_y() > 0;
+    hud.menu = false;
     hud.boxes.clear();
     if !hud.map_frame { return; }
     hud.pixels.clear();

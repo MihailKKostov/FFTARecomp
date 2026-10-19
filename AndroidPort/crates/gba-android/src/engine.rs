@@ -24,6 +24,11 @@ pub struct Engine {
     world_map: crate::world_map::WorldMap,
     /// Portrait Party screen placement of the current frame (menu_layout.rs).
     pub menu_layout: Option<crate::menu_layout::MenuLayout>,
+    /// Screen rectangle of the world map Menu button (touch-only portrait), see `map_menu_button`.
+    pub menu_button: Option<[f32;4]>,
+    /// HUD brightness of the previous frame and how many frames it has been
+    /// unchanged: the game fades the world map by rewriting the palette.
+    hud_luma: (u64,u32),
     /// Rows the presented texture is shifted by (portrait world map), for taps.
     view_shift: i32,
     pub world_rect: [f32;4],
@@ -62,6 +67,28 @@ impl Engine {
     /// portrait/square frame shows only its 240x160 picture, fitted to the screen width,
     /// so the texture rectangle is placed to line that picture up.
     /// Where GameSurface draws the world texture (world_rect without the tap shift).
+    /// Portrait world map: a Menu button (Start) in the HUD row pinned to the
+    /// frame bottom, in the gap between Clan Funds (native x 3-77) and the date
+    /// (152-240), rows 140-156. Shown only while the map waits for input: not
+    /// during fades (HUD brightness changed within 8 frames, or a BLDY fade)
+    /// and not while a game menu is open (Start does not close it).
+    fn map_menu_button(&mut self)->Option<[f32;4]>{
+        let bus=&self.machine.bus;
+        if !(bus.world_hud.map_frame && bus.ffta_dialogue.docked) {self.hud_luma=(0,0);return None;}
+        let luma:u64=bus.world_hud.pixels.iter().filter(|&&p|p!=gba_core::world_hud::TRANSPARENT)
+            .map(|&p|(p&31) as u64*2+((p>>5)&31) as u64*4+((p>>10)&31) as u64).sum();
+        let steady=if luma>0 && luma==self.hud_luma.0 {self.hud_luma.1.saturating_add(1)}else{0};
+        self.hud_luma=(luma,steady);
+        if steady<8 {return None;}
+        let (_,bottom)=self.ui_dock?;
+        let io=|o:usize|u16::from_le_bytes([bus.io[o],bus.io[o+1]]);
+        if matches!((io(0x50)>>6)&3,2|3) && io(0x54)&31!=0 {return None;}
+        if bus.world_hud.menu {return None;}
+        const NATIVE:[f32;4]=[88.,140.,140.,156.];
+        let s=self.world_rect[2]/mem::render_width() as f32;
+        Some([self.world_rect[0]+(mem::extra() as f32+NATIVE[0])*s,bottom-(160.-NATIVE[1])*s,
+            (NATIVE[2]-NATIVE[0])*s,(NATIVE[3]-NATIVE[1])*s])
+    }
     pub fn texture_rect(&self)->[f32;4]{
         let mut rect=self.world_rect;
         rect[1]+=self.view_shift as f32*rect[3]/mem::render_height() as f32;
@@ -90,7 +117,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,menu_button:None,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -243,6 +270,7 @@ impl Engine {
             self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
         }
         self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock)}else{None};
+        self.menu_button=self.map_menu_button();
         let state=&self.machine.bus.ffta_dialogue;
         if state.town_layout {self.town_menu=crate::touch::town_menu(state).or(self.town_menu);}
         else if !state.shop_layout {self.town_menu=None;}

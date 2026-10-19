@@ -36,6 +36,10 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
     @Volatile var touchOnly=false
     /** Receives the held GBA direction while a touch-only drag steers. */
     @Volatile var onDirection:(Int)->Unit={}
+    /** Touch-only portrait world map: the Menu button's rectangle (px), null when hidden. */
+    @Volatile var onMenuButton:(List<Float>?)->Unit={}
+    private val menuBuffer=FloatArray(4)
+    private var menuButton:List<Float>?=null
     /** Portrait battles: screen rows reserved above (px) and below (fraction of height, px inset) the UI frame. */
     @Volatile var dockTop=0f
     @Volatile var dockReserve=0f
@@ -201,6 +205,8 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                 val frameNanos=System.nanoTime()-start
                 simulationNanos += frameNanos
                 if (samples < 0) throw IllegalStateException(NativeBridge.gbaStatus())
+                val menu=if(touchOnly&&NativeBridge.gbaMenuButton(menuBuffer))menuBuffer.toList() else null
+                if(menu!=menuButton){menuButton=menu;onMenuButton(menu)}
                 val recycled=frames.publish(back, config,uiBack)
                 back=recycled.first
                 uiBack=recycled.second?:UiBuffers(bytes)

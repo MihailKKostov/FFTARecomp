@@ -153,6 +153,19 @@ pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaUiTimings
     }}
 }
 
+/// World map Menu button rectangle (x, y, width, height in surface pixels); false when hidden.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaMenuButton(env:*mut JNIEnv,_:jobject,out:jfloatArray)->jboolean{
+    if out.is_null(){return 0;}
+    let api=&**env;
+    if api.GetArrayLength.unwrap()(env,out)<4{return 0;}
+    let rect=ENGINE.lock().ok().and_then(|lock|lock.as_ref().and_then(|engine|engine.menu_button));
+    match rect {
+        Some(rect)=>{api.SetFloatArrayRegion.unwrap()(env,out,0,4,rect.as_ptr());1}
+        None=>0,
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaTap(_: *mut JNIEnv,_:jobject,x:jfloat,y:jfloat,back:jboolean){
     guarded(||{

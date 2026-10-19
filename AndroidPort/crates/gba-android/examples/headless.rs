@@ -182,6 +182,16 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
             }
         }
     }
+    // Touch-only Menu button the app draws over the world map (TouchKey colours).
+    if let Some([bx, by, bw, bh]) = engine.menu_button {
+        let (sw, sh) = (screen.0 as usize, screen.1 as usize);
+        for y in by.max(0.) as usize..((by + bh) as usize).min(sh) {
+            for x in bx.max(0.) as usize..((bx + bw) as usize).min(sw) {
+                let edge = y < by as usize + 3 || y + 3 >= (by + bh) as usize || x < bx as usize + 3 || x + 3 >= (bx + bw) as usize;
+                out[(y * sw + x) * 3..][..3].copy_from_slice(if edge { &[0xf6, 0xeb, 0xd0] } else { &[0x30, 0x25, 0x19] });
+            }
+        }
+    }
     out
 }
 

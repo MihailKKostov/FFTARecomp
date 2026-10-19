@@ -64,6 +64,7 @@ object NativeBridge {
                           screenWidth:Int,screenHeight:Int,fill:Boolean,ui:ByteBuffer,uiParams:FloatArray,uiBackground:ByteBuffer,
                           uiTop:Float,uiBottom:Float): Int
     external fun gbaTap(x:Float,y:Float,back:Boolean)
+    external fun gbaMenuButton(out:FloatArray):Boolean
     external fun gbaUiProfile(enabled:Boolean,reference:Boolean)
     external fun gbaReferenceFrame(reference:Boolean)
     external fun gbaReferenceDialogue(reference:Boolean)

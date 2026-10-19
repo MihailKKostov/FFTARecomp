@@ -304,6 +304,21 @@ fun TouchOnlyBar(settings:GameSettings,input:GameInput,onPause:()->Unit){
     }
 }
 
+/** Touch-only portrait world map: the game's Start menu, in the HUD row
+ *  between Clan Funds and the date (rectangle in px from the engine). */
+@Composable
+fun MapMenuButton(rect:List<Float>,settings:GameSettings,input:GameInput){
+    val view=LocalView.current
+    val density=LocalDensity.current
+    val haptic by rememberUpdatedState(settings.touch.vibration)
+    DisposableEffect(Unit){onDispose{input.set("map:menu",0)}}
+    val (x,y,width,height)=rect
+    TouchKey("Menu",Modifier.offset{IntOffset(x.roundToInt(),y.roundToInt())}
+            .size(with(density){width.toDp()},with(density){height.toDp()}),
+        maxOf(settings.opacity,.9f),false,{if(haptic)view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)},
+        {down->input.set("map:menu",if(down)TouchControl.START.mask else 0)})
+}
+
 @Composable
 private fun TouchKey(label:String,modifier:Modifier,opacity:Float,editing:Boolean,
     feedback:()->Unit,onPressed:(Boolean)->Unit,square:Boolean=false,active:Boolean=false){
