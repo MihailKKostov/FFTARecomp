@@ -126,6 +126,36 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+**Portrait Party screens (0.32).** Roster, unit status, Equip/Items, Pick
+Abilities, Change Jobs and the roster's Item List (gba-core `menu_screen.rs`,
+gba-android `menu_layout.rs`):
+- BG0 is a checkered pattern (period 32x16) over its whole 256x512 map; the
+  tall view is filled with it (BG0 only, wrapping like the hardware).
+- Per native row the PPU composes the background alone and two groups over
+  it; a group's pixels are where it differs from the background, so
+  translucent panels keep their blending. The groups move by whole pattern
+  periods (16 rows), where the background underneath is identical.
+- Unit screens (BG2CNT 2b0a): upper group = BG1 above row 61 (header and its
+  separator) and sprite pictures centred above it; BG2/BG3 (stats, menus,
+  Equip/Items/ability panels) always in the lower group, so a panel that
+  overlaps the separator moves with its list and the separator stays whole.
+  Roster (2b09): bar and unit grid above row 100, unit panel below. Item List
+  (BG3 title bar in tile rows 0-1): one group, kept together until a unit
+  header appears (it erases its title bar first when closing).
+- Sprite pictures = same-priority objects whose boxes overlap or touch;
+  each goes to the group of its centre row, so portraits are never split.
+- The upper group is docked under the top bar, the lower group to the bottom
+  (menus in thumb reach). Taps undo the group's move; taps in the gap do
+  nothing.
+- Audited frame by frame (1080x2400): fade in/out, roster cursor, roster to
+  status, Equip, Items, back, Pick Abilities and its list, Change Jobs and
+  the job wheel, Left/Right unit switching, Item List in and out, Sort.
+  Fixed: body rows jumping from under the header while the header slid in
+  (template now from BG2CNT), black rows above the screen (BG0 wraps),
+  Item List icons flying to the top while it closed.
+- Not done: tap targets for the Party menus (a tap still presses A, as in
+  landscape).
+
 **World map margins (0.31).** Above and below the map the parchment
 continues instead of a dark margin: the map's outermost 6 rows are mirrored
 outward in tiles (each shifted sideways, two tilings cross-faded half a tile

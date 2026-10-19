@@ -207,6 +207,11 @@ impl Engine {
         }else{
             let nx=(px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32-mem::extra() as f32;
             let ny=(py-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32-mem::extra_y() as f32;
+            // Portrait Party screens: undo the group's move; taps between the groups do nothing.
+            let ny=match self.menu_layout {
+                Some(layout)=>match layout.native_row(ny) {Some(row)=>row,None=>return},
+                None=>ny,
+            };
             if let Some(keys)=self.usa.then(||crate::title_touch::keys(&self.machine.bus,nx,ny)).flatten(){
                 self.mouse.cancel();
                 if !keys.is_empty(){battle::press_sequence(&mut self.machine.bus,&keys);}

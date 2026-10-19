@@ -22,6 +22,8 @@ pub struct Engine {
     pub expanded: bool,
     pub padded: bool,
     world_map: crate::world_map::WorldMap,
+    /// Portrait Party screen placement of the current frame (menu_layout.rs).
+    pub menu_layout: Option<crate::menu_layout::MenuLayout>,
     /// Rows the presented texture is shifted by (portrait world map), for taps.
     view_shift: i32,
     pub world_rect: [f32;4],
@@ -88,7 +90,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -163,6 +165,7 @@ impl Engine {
         // still and pin its HUD to the edges; shorter views keep the game camera.
         self.machine.bus.world_hud.enabled=extra_x<=8 && 160+2*extra_y>=360;
         self.machine.bus.ffta_dialogue.docked=self.machine.bus.world_hud.enabled && self.ui_dock.is_some();
+        self.machine.bus.menu_screen.enabled=self.machine.bus.ffta_dialogue.docked;
         self.audio.clear();
         self.pcm.begin(count.clamp(1,8),mode,
             self.cache_dir.as_deref().unwrap_or(&std::env::temp_dir()))?;
@@ -209,7 +212,8 @@ impl Engine {
         let expanded_rows=mem::extra_y()>0 && (self.machine.bus.ffta_movement.enabled || self.machine.bus.ffta_stage.enabled)
             && (0..4).any(|bg|gba_core::ppu::ffta_terrain(&self.machine.bus,bg)
                 || gba_core::ffta_stage::layer(&self.machine.bus,bg).is_some()
-                || (self.machine.bus.world_hud.enabled && gba_core::ppu::ffta_world_map(&self.machine.bus,bg)));
+                || (self.machine.bus.world_hud.enabled && gba_core::ppu::ffta_world_map(&self.machine.bus,bg)))
+            || (mem::extra_y()>0 && self.machine.bus.menu_screen.frame);
         let padded=mem::extra_y()>0 && !expanded_rows;
         self.expanded=expanded_rows;
         self.padded=padded;
@@ -226,16 +230,19 @@ impl Engine {
         // world_rect still carries the shift of the frame it was set for.
         let rect=self.texture_rect();
         self.view_shift=0;
-        if expanded_rows && self.machine.bus.world_hud.map_frame {
+        let dock={
             let rh=mem::render_height() as f32;
             let s=rect[3]/rh;
-            let dock=match self.ui_dock {
+            match self.ui_dock {
                 Some((top,bottom)) if s>0. => (((top-rect[1])/s).ceil() as i32,((bottom-rect[1])/s).floor() as i32),
                 _ => (0,rh as i32),
-            };
+            }
+        };
+        if expanded_rows && self.machine.bus.world_hud.map_frame {
             self.world_map.present(&self.machine.bus,&mut self.pixels,dock);
             self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
         }
+        self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock)}else{None};
         let state=&self.machine.bus.ffta_dialogue;
         if state.town_layout {self.town_menu=crate::touch::town_menu(state).or(self.town_menu);}
         else if !state.shop_layout {self.town_menu=None;}

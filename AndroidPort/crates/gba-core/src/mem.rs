@@ -220,6 +220,7 @@ pub struct MemMap {
     /// state (HBlank DMA, IRQs, affine latches at line 0) is unaffected.
     pub skip_render: bool,
     pub world_hud: crate::world_hud::WorldHud,
+    pub menu_screen: crate::menu_screen::MenuScreen,
     pub frames: u64,
 
     /// 240×160 RGB555 output, written per scanline by the PPU.
@@ -357,6 +358,7 @@ impl MemMap {
             frame_ready: false,
             skip_render: false,
             world_hud: Default::default(),
+            menu_screen: Default::default(),
             frames: 0,
             framebuffer: vec![0; VISIBLE_WIDTH * VISIBLE_SCANLINES as usize],
             wide_framebuffer: vec![0; MAX_RENDER_WIDTH * MAX_RENDER_HEIGHT],

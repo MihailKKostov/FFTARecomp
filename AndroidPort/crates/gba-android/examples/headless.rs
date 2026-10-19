@@ -325,6 +325,8 @@ fn main() -> Result<(), String> {
             std::fs::write(out.join(format!("{name}.oam")), &engine.machine.bus.oam).map_err(|e| e.to_string())?;
             if let Some(oam) = &oam_before { std::fs::write(out.join(format!("{name}.oam0")), oam).map_err(|e| e.to_string())?; }
             std::fs::write(out.join(format!("{name}.io")), &engine.machine.bus.io).map_err(|e| e.to_string())?;
+            std::fs::write(out.join(format!("{name}.vram")), &engine.machine.bus.vram).map_err(|e| e.to_string())?;
+            std::fs::write(out.join(format!("{name}.pal")), &engine.machine.bus.palette).map_err(|e| e.to_string())?;
         }
         if !shots.is_empty() { engine.set_view(screen, view.extra_x, view.extra_y, true); }
         for name in shots {

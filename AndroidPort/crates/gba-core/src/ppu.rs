@@ -110,6 +110,7 @@ pub fn ffta_zoom_rows_ready(mem: &MemMap) -> bool {
         && (mem.ffta_movement.enabled || mem.ffta_stage.enabled)
         && (0..4).any(|bg| ffta_terrain(mem, bg) || crate::ffta_stage::layer(mem, bg).is_some()
             || (mem.world_hud.enabled && ffta_world_map(mem, bg)))
+        || mem.menu_screen.frame
 }
 
 /// Docked (portrait) town scene: shop, pub, prison... Measured USA: the whole
@@ -123,6 +124,8 @@ fn docked_town_scene(mem: &MemMap) -> bool {
 /// planes hold only parked tiles there (stat digits under the quantity prompt).
 fn zoom_bg(mem: &MemMap, dispcnt: u16, bg: usize) -> bool {
     dispcnt & (0x100 << bg) != 0 && !(bg >= 2 && docked_town_scene(mem))
+        // Party screens: only the background pattern fills the rows beyond (menu_screen.rs).
+        && !(mem.menu_screen.frame && bg != 0)
 }
 
 pub fn render_ffta_zoom_rows(mem: &mut MemMap) {
@@ -173,7 +176,7 @@ fn render_ffta_zoom_rows_impl(mem: &mut MemMap) {
         }
         let mut objects = [OBJ_EMPTY; MAX_RENDER_WIDTH];
         let mut window = [false; MAX_RENDER_WIDTH];
-        let semi = if dispcnt & 0x1000 != 0 {
+        let semi = if dispcnt & 0x1000 != 0 && !mem.menu_screen.frame {
             render_sprites(mem, dispcnt, line, &mut objects, &mut window)
         } else {
             false
@@ -349,7 +352,7 @@ fn render_zoom_lane(
         }
         objects[..rw].fill(OBJ_EMPTY);
         window[..rw].fill(false);
-        let semi = if dispcnt & 0x1000 != 0 {
+        let semi = if dispcnt & 0x1000 != 0 && !mem.menu_screen.frame {
             render_sprites(mem, dispcnt, line, &mut objects, &mut window)
         } else {
             false
@@ -384,6 +387,7 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
         begin_dialogue_frame(mem);
         let world_map=ffta_world_map(mem,0)&&ffta_world_map(mem,1);
         crate::world_hud::begin_frame(mem,world_map);
+        crate::menu_screen::begin_frame(mem);
         if let Some(start)=profile {mem.ffta_dialogue.profile.setup_ns=start.elapsed().as_nanos() as u64;}
         mem.ffta_movement.sky_edges[0] = pal16(mem, 0);
     }
@@ -513,6 +517,9 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
             mem.world_hud.pixels[line*VISIBLE_WIDTH+x]=hud;
         }
     }
+    let menu_background=if mem.menu_screen.frame {
+        Some(capture_menu_groups(mem,dispcnt,line,&bg_lines,&bg_used))
+    }else{None};
     let panel=mem.ffta_dialogue.placement.is_some() || mem.ffta_dialogue.extra.active();
     let extract_first=mem.ffta_dialogue.separate && !mem.ffta_dialogue.reference_dialogue;
     let ui_objects=if extract_first {
@@ -541,6 +548,11 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
     if mem.ffta_dialogue.separate && !extract_first {
         capture_scanline_ui(mem,dispcnt,line,&bg_lines,&bg_used,&obj_line,&obj_window);
     }
+    if let Some(background)=menu_background {
+        // The tall view shows only the pattern; the groups are placed by the frontend.
+        let rw=render_width();
+        mem.wide_framebuffer[line*rw..(line+1)*rw].copy_from_slice(&background[..rw]);
+    }
     if panel && !mem.ffta_dialogue.reuse_world_row {
         // Keep the hardware framebuffer untouched. Only the host wide view
         // receives relocated UI; reuse the world BG rows already rendered.
@@ -559,6 +571,38 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
         mem.ffta_dialogue.wide_pass = false;
     }
     if let Some(start)=raster_timer {mem.ffta_dialogue.profile.raster_ns+=start.elapsed().as_nanos() as u64;}
+}
+
+/// Party screens in portrait (menu_screen.rs): composes the background alone
+/// and each group over it, keeping the pixels where a group differs from the
+/// background. Returns the background row for the tall view.
+fn capture_menu_groups(mem:&mut MemMap,dispcnt:u16,line:usize,bg_lines:&[Line;4],bg_used:&[bool;4])->[u16;MAX_RENDER_WIDTH]{
+    let rw=render_width();
+    let ex=extra();
+    let template=mem.menu_screen.template;
+    let mut counts=std::collections::BTreeMap::new();
+    let compose_with=|mem:&MemMap,used:&[bool;4],objects:&[ObjPixel;MAX_RENDER_WIDTH],window:&[bool;MAX_RENDER_WIDTH],semi:bool,counts:&mut std::collections::BTreeMap<u32,u32>|{
+        let mut out=[0u16;MAX_RENDER_WIDTH];
+        compose_into_range(mem,dispcnt,line,bg_lines,used,objects,window,semi,&mut out[..rw],counts,0,rw);
+        out
+    };
+    let only_background=[bg_used[0],false,false,false];
+    let background=compose_with(mem,&only_background,&[OBJ_EMPTY;MAX_RENDER_WIDTH],&[false;MAX_RENDER_WIDTH],false,&mut counts);
+    for group in 0..2u8 {
+        let used:[bool;4]=std::array::from_fn(|bg|bg_used[bg] && crate::menu_screen::bg_in_group(template,bg,line,group));
+        let mut objects=[OBJ_EMPTY;MAX_RENDER_WIDTH];
+        let mut window=[false;MAX_RENDER_WIDTH];
+        mem.menu_screen.rendering=Some(group);
+        let semi=dispcnt&0x1000!=0 && render_sprites(mem,dispcnt,line,&mut objects,&mut window);
+        mem.menu_screen.rendering=None;
+        let picture=compose_with(mem,&used,&objects,&window,semi,&mut counts);
+        let target=&mut mem.menu_screen.groups[(group as usize*160+line)*VISIBLE_WIDTH..][..VISIBLE_WIDTH];
+        for (x,pixel) in target.iter_mut().enumerate() {
+            let p=picture[ex+x];
+            *pixel=if p==background[ex+x]{crate::menu_screen::TRANSPARENT}else{p};
+        }
+    }
+    background
 }
 
 /// Wide opaque warning window, identified by WIN0 and its four frame corners.
@@ -2417,9 +2461,11 @@ fn render_text_bg_hardware_range(
     };
     // Extend menu panels only within their real tile plane. Do not repeat
     // a static UI into the rows above/below it when zooming out.
+    // The Party screens' background pattern repeats like the hardware (menu_screen.rs).
     let vertical_policy = if mem.ffta_movement.zoom_output
         && !ffta_terrain(mem, bg)
         && !ffta_movement_grid(mem, bg)
+        && !(mem.menu_screen.frame && bg == 0)
     {
         FftaBgEdge::Transparent
     } else {
@@ -2831,6 +2877,7 @@ fn render_sprites_extent(
                     sprite.owner,
                     sprite.stats_background,
                     sprite.stats_inner_padding,
+                    None,
                 ));
             }
             if slot >= 128 {
@@ -2852,11 +2899,15 @@ fn render_sprites_extent(
                     mem.ffta_sprites.oam_owners.get(i).copied().unwrap_or(0),
                     false,
                     false,
+                    Some(i),
                 ));
             }
         }
     });
-    for ([a0, a1, a2], coordinates, owner, stats_background, stats_inner_padding) in expanded {
+    for ([a0, a1, a2], coordinates, owner, stats_background, stats_inner_padding, guest_slot) in expanded {
+        if !crate::menu_screen::sprite_visible(mem, guest_slot, a0, a1) {
+            continue;
+        }
         // Unused FFTA OAM slots park offscreen at (248,168). Vertical zoom
         // would unwrap that Y coordinate and expose tile zero in the sky.
         // Verified host objects carry full coordinates and are not filtered.
