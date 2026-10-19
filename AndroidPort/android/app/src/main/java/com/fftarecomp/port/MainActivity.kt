@@ -77,6 +77,7 @@ class GameSettings(context: Context) {
     var bubbleLength by mutableFloatStateOf(prefs.getFloat("bubble_length",1f).coerceIn(1f,2f))
     var multiplier by mutableIntStateOf(prefs.getInt("speed",2).coerceIn(2,8))
     var audioMode by mutableStateOf(FastAudio.entries.getOrElse(prefs.getInt("ff_audio",0)){FastAudio.NORMAL})
+    var orientation by mutableStateOf(Orientation.entries.getOrElse(prefs.getInt("orientation",0)){Orientation.LANDSCAPE})
     var touchVisible by mutableStateOf(true)
     var controllerConnected by mutableStateOf(false)
     var fastForward by mutableStateOf(false)
@@ -116,7 +117,8 @@ class GameSettings(context: Context) {
     fun save() { prefs.edit().putInt("aspect",aspect.ordinal).putInt("zoom",zoom)
         .putBoolean("sound",sound).putFloat("volume",volume).putBoolean("controls",controls)
         .putFloat("opacity",opacity).putFloat("size",controlSize).putInt("speed",multiplier).putInt("ff_audio",audioMode.ordinal)
-        .putFloat("bubble_size",bubbleSize).putFloat("bubble_length",bubbleLength).apply() }
+        .putFloat("bubble_size",bubbleSize).putFloat("bubble_length",bubbleLength)
+        .putInt("orientation",orientation.ordinal).apply() }
 }
 
 class MainActivity : AppCompatActivity(), InputManager.InputDeviceListener {
@@ -256,12 +258,17 @@ private fun MainScreen(settings: GameSettings, input: GameInput, setInGame: (Boo
     var loading by remember {mutableStateOf(initialRoute==StartupRoute.LOADING)}
     // Loading and gameplay share one orientation owner. A screen-specific
     // onDispose must not restore portrait between these two compositions.
-    val useLandscape=loading || playing
-    DisposableEffect(useLandscape) {
+    val inGame=loading || playing
+    val orientation=settings.orientation
+    DisposableEffect(inGame,orientation) {
         val activity=context as AppCompatActivity
         val previous=activity.requestedOrientation
-        if(useLandscape)activity.requestedOrientation=ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        onDispose {if(useLandscape)activity.requestedOrientation=previous}
+        if(inGame)activity.requestedOrientation=when(orientation){
+            Orientation.LANDSCAPE->ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            Orientation.PORTRAIT->ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            Orientation.AUTO->ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+        }
+        onDispose {if(inGame)activity.requestedOrientation=previous}
     }
 
     LaunchedEffect(Unit) {
@@ -503,7 +510,14 @@ private fun GameScreen(settings:GameSettings,input:GameInput,onExit:()->Unit,onS
                             MenuButton("Exit Game"){onExit()}
                         }
                         "video"->{
-                            Text("Aspect ratio")
+                            Text("Orientation")
+                            FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                                Orientation.entries.forEach{mode->FilterChip(selected=settings.orientation==mode,onClick={
+                                    settings.orientation=mode;settings.save()
+                                },label={Text(mode.label)})}
+                            }
+                            Text("Portrait always fills the screen; battles show more of the map above and below.",fontSize=12.sp)
+                            Text("Aspect ratio (landscape)")
                             FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                                 AspectMode.entries.forEach{aspect->FilterChip(selected=settings.aspect==aspect,onClick={
                                     settings.aspect=aspect;settings.zoom=settings.zoom.coerceAtMost(ViewConfig.maxZoom(aspect));settings.save()

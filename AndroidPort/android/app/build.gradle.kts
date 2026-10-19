@@ -12,14 +12,24 @@ android {
         applicationId = "com.fftarecomp.port"
         minSdk = 24
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.25-android-preview"
+        versionCode = 26
+        versionName = "0.26-android-preview"
         ndk { abiFilters += "arm64-v8a" }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         multiDexEnabled = true
     }
 
+    signingConfigs {
+        // Shared debug key (public password "android") so preview APKs update in place
+        // no matter which machine built them.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -30,6 +40,7 @@ android {
         }
         debug {
             isDebuggable = true
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

@@ -15,9 +15,13 @@ enum class AspectMode(val label: String, val baseExtra: Int, val baseHeight: Int
     PHONE("20:9", 58), ULTRAWIDE("21:9", 66), SUPERWIDE("32:9", 164),
     SQUARE("1:1",8,256), NOTE10("19:9",49), DEVICE("Full screen",49)
 }
+enum class Orientation(val label:String) { LANDSCAPE("Landscape"), PORTRAIT("Portrait"), AUTO("Auto-rotate") }
 enum class FastAudio(val label:String) { NORMAL("Normal"), SILENT("Silent"), FAST("Fast audio") }
 
-data class ViewRequest(val aspect:AspectMode,val zoom:Int)
+data class ViewRequest(val aspect:AspectMode,val zoom:Int) {
+    /** Fixed aspect presets are landscape shapes; a portrait surface always uses its own full screen. */
+    fun aspectFor(screenWidth:Int,screenHeight:Int)=if(screenHeight>screenWidth)AspectMode.DEVICE else aspect
+}
 
 data class ViewConfig(val extraX: Int, val extraY: Int,val fillScreen:Boolean=false) {
     val width get() = 240 + 2 * extraX

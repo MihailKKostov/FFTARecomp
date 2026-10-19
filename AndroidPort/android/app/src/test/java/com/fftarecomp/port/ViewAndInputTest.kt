@@ -36,4 +36,13 @@ class ViewAndInputTest {
         input.clear()
         assertEquals(0,input.buttons.get())
     }
+    @Test fun portraitAlwaysUsesTheFullTallScreen() {
+        val request=ViewRequest(AspectMode.WIDESCREEN,0)
+        assertEquals(AspectMode.WIDESCREEN,request.aspectFor(2400,1080))
+        assertEquals(AspectMode.DEVICE,request.aspectFor(1080,2400))
+        val view=ViewConfig.create(request.aspectFor(1080,2400),0,1080,2400)
+        assertEquals(256,view.width)
+        assertTrue(view.height>500)
+        assertTrue(view.fillScreen)
+    }
 }

@@ -161,7 +161,8 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                 }
                 wasPaused = false
                 val request=viewRequest
-                val config = benchmark?.view ?: ViewConfig.create(request.aspect,request.zoom,frames.screenWidth,frames.screenHeight)
+                val aspect=request.aspectFor(frames.screenWidth,frames.screenHeight)
+                val config = benchmark?.view ?: ViewConfig.create(aspect,request.zoom,frames.screenWidth,frames.screenHeight)
                 val bytes = config.width * config.height * 4
                 if (back == null || back.capacity() != bytes) {
                     back = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
@@ -182,7 +183,7 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                 val start = System.nanoTime()
                 if(!experimentalClicks)taps.clear()
                 while(true){val tap=taps.poll()?:break;NativeBridge.gbaTap(tap.x,tap.y,tap.back);deliveredClicks.incrementAndGet()}
-                val base=ViewConfig.create(request.aspect,0,frames.screenWidth,frames.screenHeight)
+                val base=ViewConfig.create(aspect,0,frames.screenWidth,frames.screenHeight)
                 val samples = NativeBridge.gbaFrame(benchmark?.keys() ?: (inputSource.get().inv() and 0x3ff),
                     config.extraX, config.extraY, multiplier, sound, if(mode==FastAudio.NORMAL)2 else 1, back, sampleBuffer,
                     experimentalClicks,base.width*160f/base.height,bubbleSize,bubbleLength,

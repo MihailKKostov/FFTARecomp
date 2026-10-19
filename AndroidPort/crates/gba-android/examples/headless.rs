@@ -93,6 +93,12 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
     let mut params = [0f32; 18];
     let mut background = vec![0i32; ww * wh];
     engine.export_ui(&mut packed, &mut params, &mut background);
+    if std::env::var_os("FFTA_UI_DEBUG").is_some() {
+        let state = &engine.machine.bus.ffta_dialogue;
+        eprintln!("ui params {params:?}\n  main {:?} extra {:?} kind {:?} action {} town {} shop {}",
+            gba_core::ffta_dialogue::pixel_bounds(&state.pixels), gba_core::ffta_dialogue::pixel_bounds(&state.extra.pixels),
+            state.extra.kind, state.action_layout, state.town_layout, state.shop_layout);
+    }
     for layer in 0..2 {
         let p = &params[layer * 9..layer * 9 + 9];
         if p[2] <= 0. { continue; }
@@ -224,6 +230,21 @@ fn main() -> Result<(), String> {
         for name in shots {
             let path = out.join(format!("{name}.png"));
             write_png(&path, screen.0, screen.1, &compose(&engine, &view, screen)).map_err(|e| e.to_string())?;
+            if std::env::var_os("FFTA_UI_DEBUG").is_some() {
+                // Raw world texture and the untouched 240x160 hardware frame, plus BG scroll registers.
+                let raw: Vec<u8> = engine.pixels.iter().flat_map(|&p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
+                write_png(&out.join(format!("{name}.raw.png")), (240 + 2 * view.extra_x) as u32,
+                    (160 + 2 * view.extra_y) as u32, &raw).map_err(|e| e.to_string())?;
+                let native: Vec<u8> = engine.machine.bus.framebuffer.iter().flat_map(|&p| {
+                    let c = |v: u16| ((v & 31) as u32 * 255 / 31) as u8;
+                    [c(p), c(p >> 5), c(p >> 10)]
+                }).collect();
+                write_png(&out.join(format!("{name}.native.png")), 240, 160, &native).map_err(|e| e.to_string())?;
+                let io = &engine.machine.bus.io;
+                let r = |o: usize| u16::from_le_bytes([io[o], io[o + 1]]);
+                eprintln!("dispcnt {:04x} bgcnt {:04x} {:04x} {:04x} {:04x} hofs {} {} {} {} vofs {} {} {} {}",
+                    r(0), r(8), r(10), r(12), r(14), r(16), r(20), r(24), r(28), r(18), r(22), r(26), r(30));
+            }
             println!("frame {frame}: {}", path.display());
         }
     }
