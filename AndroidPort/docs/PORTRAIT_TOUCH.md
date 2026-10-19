@@ -126,6 +126,13 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+**World map margins (0.31).** Above and below the map the parchment
+continues instead of a dark margin: the map's outermost 6 rows are mirrored
+outward in tiles (each shifted sideways, two tilings cross-faded half a tile
+apart so no seam shows) and blend into their average colour within 48 rows.
+They are rendered pixels, so fades and transitions darken them with the map
+(`world_map.rs extend_paper`).
+
 **World map taps (0.30).** A tap on a place other than the cursor's only
 moves the cursor there (the game shows its name); a tap within 12 pixels of
 the cursor moves Marche there (`ffta_battle_mouse::world_select`).

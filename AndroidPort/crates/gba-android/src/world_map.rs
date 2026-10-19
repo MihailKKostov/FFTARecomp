@@ -8,6 +8,12 @@
 use gba_core::{mem::{self, MemMap}, world_hud::TRANSPARENT};
 
 const MAP_CENTER: i32 = 176;
+/// Map rows (BG0/BG1 content); the outermost rows are plain parchment.
+const MAP_ROWS: i32 = 352;
+/// Parchment rows tiled outward into the margins, and the distance (rows)
+/// over which the tiling blends into the parchment's average colour.
+const EDGE_ROWS: i32 = 6;
+const PAPER_FADE: f32 = 48.;
 const STABLE_FRAMES: u16 = 30;
 const MISSING_FRAMES: u16 = 20;
 
@@ -32,6 +38,52 @@ fn faded(bus: &MemMap, color: u16, target: u16) -> u16 {
 pub struct WorldMap { towns: Vec<Town> }
 
 fn half(data: &[u8], offset: usize) -> u16 { u16::from_le_bytes([data[offset], data[offset + 1]]) }
+
+/// Continues the map's parchment beyond its `edge` row (displayed row of the
+/// outermost map row) in direction `outward` (-1 up, 1 down): the edge rows are
+/// mirrored outward in tiles, each tile shifted sideways so no pattern repeats,
+/// blending into their average colour. Two tilings half a tile apart are
+/// cross-faded so no tile boundary shows as a seam. Rendered pixels, so fades apply. Only
+/// the 240 map columns (from `ex`) are sampled; the side columns are margin.
+fn extend_paper(out: &mut [i32], rw: usize, rh: i32, ex: usize, edge: i32, outward: i32) {
+    let rows: Vec<i32> = (0..EDGE_ROWS).map(|i| edge - outward * i).collect();
+    if rows.iter().any(|r| !(0..rh).contains(r)) || ex + 240 > rw { return; }
+    let band: Vec<i32> = rows.iter().flat_map(|&r| out[r as usize * rw + ex..r as usize * rw + ex + 240].to_vec()).collect();
+    let mut sum = [0u64; 3];
+    for &p in &band { for (c, s) in sum.iter_mut().enumerate() { *s += ((p >> (16 - 8 * c)) & 255) as u64; } }
+    let mean = sum.map(|s| (s / band.len() as u64) as f32);
+    let period = 2 * EDGE_ROWS;
+    // Row of the band and sideways shift for tiling position `k` (0-based).
+    let tiling = |k: i32, salt: u32| {
+        let m = k % period;
+        let i = (if m < EDGE_ROWS { m } else { period - 1 - m }) as usize;
+        let tile = (k / period) as u32 ^ salt;
+        let shift = if tile == 0 { 0 } else { (tile.wrapping_mul(2654435761) >> 16) as usize % 240 };
+        (i, shift)
+    };
+    let (mut row, mut d) = (edge + outward, 1);
+    while (0..rh).contains(&row) {
+        let k = d - 1;
+        let (ia, sa) = tiling(k, 0);
+        let (ib, sb) = tiling(k + EDGE_ROWS, 0x5bd1);
+        // Tiling A alone next to the map, then a triangle weight that is zero at A's seams.
+        let wa = if k < EDGE_ROWS { 1. } else { 1. - ((2 * (k % period) + 1) as f32 / period as f32 - 1.).abs() };
+        let f = (d as f32 / PAPER_FADE).min(1.) * 0.85;
+        let target = &mut out[row as usize * rw..(row as usize + 1) * rw];
+        for (x, t) in target.iter_mut().enumerate() {
+            let column = x + 240 * 2 - ex;
+            let (pa, pb) = (band[ia * 240 + (column + sa) % 240], band[ib * 240 + (column + sb) % 240]);
+            let mix = |c: usize| {
+                let channel = |p: i32| ((p >> (16 - 8 * c)) & 255) as f32;
+                let v = channel(pa) * wa + channel(pb) * (1. - wa);
+                ((v + (mean[c] - v) * f).round() as i32) << (16 - 8 * c)
+            };
+            *t = (0xff00_0000u32 as i32) | mix(0) | mix(1) | mix(2);
+        }
+        row += outward;
+        d += 1;
+    }
+}
 
 /// A 32x32 priority-2 object: placed towns and similar static map icons.
 fn town_object(a0: u16, a1: u16, a2: u16) -> bool {
@@ -126,6 +178,9 @@ impl WorldMap {
         }
         // Absolute map row a is displayed at row a - first.
         let first = vofs - ey + shift;
+        // No border: the parchment continues above and below the map.
+        extend_paper(&mut out, rw, rh as i32, ex as usize, -first, -1);
+        extend_paper(&mut out, rw, rh as i32, ex as usize, MAP_ROWS - 1 - first, 1);
         // Culled towns are drawn whole; towns the game still shows only get the
         // rows outside its native view, which it cannot draw.
         for town in self.towns.iter().filter(|t| !t.indices.is_empty()) {
@@ -182,6 +237,24 @@ mod tests {
         assert_eq!(faded(&bus, 0x7fff, 0x04), 0x7fff);
         bus.io[0x54] = 8;
         assert_eq!(faded(&bus, 0x001f, 0x10), 0x0010);
+    }
+    #[test]
+    fn margins_continue_the_parchment_edge_without_a_border() {
+        let (rw, rh, ex) = (256usize, 120i32, 8usize);
+        let grey = |v: i32| (0xff00_0000u32 as i32) | v << 16 | v << 8 | v;
+        // Map rows 40..80, each map row a different shade; side columns black margin.
+        let mut out = vec![grey(0); rw * rh as usize];
+        for y in 40..80 { for x in ex..ex + 240 { out[y * rw + x] = grey(100 + y as i32); } }
+        extend_paper(&mut out, rw, rh, ex, 40, -1);
+        extend_paper(&mut out, rw, rh, ex, 79, 1);
+        let at = |x: usize, y: usize| out[y * rw + x] & 255;
+        // The rows touching the map mirror its edge rows, so there is no seam.
+        assert_eq!(at(100, 39), at(100, 40));
+        assert_eq!(at(100, 80), at(100, 79));
+        // The whole margin (side columns included) is parchment, never the black margin.
+        assert!((0..40).chain(80..rh as usize).all(|y| (0..rw).all(|x| at(x, y) >= 100)));
+        // Far rows settle on the edge band's average.
+        assert!((at(100, 0) - 142).abs() <= 2);
     }
     #[test]
     fn the_map_stays_still_while_the_game_camera_scrolls() {
