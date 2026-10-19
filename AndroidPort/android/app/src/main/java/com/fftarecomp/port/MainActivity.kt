@@ -318,6 +318,20 @@ private fun MainScreen(settings: GameSettings, input: GameInput, setInGame: (Boo
             }
         }
     }
+    val exporter=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if(uri!=null)scope.launch {
+            try { withContext(Dispatchers.IO){exportSave(context,save,uri)};status="Save exported." }
+            catch(failure:Throwable){error=failure.message}
+        }
+    }
+    val importer=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if(uri!=null)scope.launch {
+            busy=true;error=null
+            try { withContext(Dispatchers.IO){importSave(context,rom,save,uri)};status="Save imported. The previous save was kept as a backup." }
+            catch(failure:Throwable){error=failure.message}
+            finally{busy=false}
+        }
+    }
     LaunchedEffect(busy) {
         while(busy) {
             if(NativeBridge.loadError==null) {
@@ -331,7 +345,7 @@ private fun MainScreen(settings: GameSettings, input: GameInput, setInGame: (Boo
     if(loading) {
         LoadingScreen()
     } else if(playing&&!switchingRom) {
-        GameScreen(settings,input,onExit={playing=false;switchingRom=false},onSwitchRom={
+        GameScreen(settings,input,save,onExit={playing=false;switchingRom=false},onSwitchRom={
             if(NativeBridge.gbaSave()!=1) {
                 false
             } else {
@@ -372,6 +386,10 @@ private fun MainScreen(settings: GameSettings, input: GameInput, setInGame: (Boo
                         finally{busy=false;loading=false}
                     }
                 },modifier=Modifier.fillMaxWidth()) {Text(if(NativeBridge.compiled)"Continue game" else "Play")}
+                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick={exporter.launch("ffta.sav")},enabled=!busy&&available,modifier=Modifier.weight(1f)){Text("Export save")}
+                    OutlinedButton(onClick={importer.launch(arrayOf("*/*"))},enabled=!busy&&available&&NativeBridge.loadError==null,modifier=Modifier.weight(1f)){Text("Import save")}
+                }
                 if(busy)LinearProgressIndicator(Modifier.fillMaxWidth())
                 Text(status,fontSize=13.sp)
                 error?.let {Text(it,color=Color(0xFF9B2929),fontSize=13.sp)}
@@ -401,8 +419,16 @@ private fun LoadingScreen() {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun GameScreen(settings:GameSettings,input:GameInput,onExit:()->Unit,onSwitchRom:()->Boolean) {
+private fun GameScreen(settings:GameSettings,input:GameInput,save:File,onExit:()->Unit,onSwitchRom:()->Boolean) {
     val context=LocalContext.current
+    val scope=rememberCoroutineScope()
+    var saveMessage by remember {mutableStateOf<String?>(null)}
+    val exporter=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if(uri!=null)scope.launch {
+            saveMessage=try{withContext(Dispatchers.IO){exportSave(context,save,uri)};"Save exported."}
+                catch(failure:Throwable){"Export failed: ${failure.message}"}
+        }
+    }
     val activity=context as AppCompatActivity
     val lifecycle=activity.lifecycle
     var surface by remember {mutableStateOf<GameSurface?>(null)}
@@ -503,6 +529,8 @@ private fun GameScreen(settings:GameSettings,input:GameInput,onExit:()->Unit,onS
                             MenuButton("Text bubbles"){page="text bubbles"}
                             MenuButton("Audio"){page="audio"}
                             MenuButton("Input"){page="input"}
+                            MenuButton("Export save"){exporter.launch("ffta.sav")}
+                            saveMessage?.let{Text(it,fontSize=12.sp)}
                             MenuButton("Switch ROM"){
                                 switchRomError=null
                                 if(!onSwitchRom()) switchRomError=NativeBridge.gbaStatus()
@@ -577,6 +605,30 @@ private fun GameScreen(settings:GameSettings,input:GameInput,onExit:()->Unit,onS
             }
         }
     }
+}
+
+/** Writes the current battery save to a user-chosen document. */
+private fun exportSave(context:Context,save:File,uri:android.net.Uri) {
+    if(NativeBridge.romVerified)check(NativeBridge.gbaSave()==1){NativeBridge.gbaStatus()}
+    check(save.isFile){"No save file yet. Save in the game first."}
+    (context.contentResolver.openOutputStream(uri,"wt")?:throw IllegalStateException("Cannot write the selected document"))
+        .use{target->save.inputStream().use{it.copyTo(target)}}
+}
+
+/** Replaces the battery save; a loaded game reloads so the old save in memory cannot overwrite it. */
+private fun importSave(context:Context,rom:File,save:File,uri:android.net.Uri) {
+    val bytes=context.contentResolver.openInputStream(uri)?.use{source->
+        val out=java.io.ByteArrayOutputStream();val block=ByteArray(65536);var total=0
+        while(true){val n=source.read(block);if(n<0)break
+            total+=n;require(total<=256*1024){"File is larger than a GBA save"};out.write(block,0,n)}
+        out.toByteArray()
+    }?:throw IllegalStateException("Cannot read the selected document")
+    require(bytes.isNotEmpty()){"The selected save is empty"}
+    if(save.isFile)save.copyTo(File(save.parentFile,save.name+".bak"),overwrite=true)
+    val temp=File(save.parentFile,save.name+".import")
+    temp.writeBytes(bytes)
+    check(temp.renameTo(save)){"Cannot replace the save file"}
+    if(NativeBridge.romVerified)NativeBridge.load(rom,save)
 }
 
 @Composable
