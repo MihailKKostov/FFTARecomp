@@ -8,7 +8,8 @@ pub const UI_SLOTS:usize=4;
 /// Visible blocks of a native UI canvas: row clusters split at empty rows,
 /// then each split at empty columns. Native coordinates (x relative to the
 /// 240-wide screen). Returns the blocks and how many belong to the top cluster.
-pub fn canvas_regions(pixels:&[dialogue::UiPixel])->(Vec<[i32;4]>,usize){
+/// Row ranges of a native UI canvas holding visible pixels, split at 4+ empty rows.
+fn row_clusters(pixels:&[dialogue::UiPixel])->Vec<(usize,usize)>{
     let (width,height)=(dialogue::LAYER_WIDTH,pixels.len()/dialogue::LAYER_WIDTH);
     let row=|y:usize|pixels[y*width..(y+1)*width].iter().any(|p|p.visible());
     let mut clusters=Vec::new();let mut y=0;
@@ -18,6 +19,12 @@ pub fn canvas_regions(pixels:&[dialogue::UiPixel])->(Vec<[i32;4]>,usize){
         while y<height&&gap<4 {if row(y){end=y+1;gap=0}else{gap+=1}y+=1;}
         clusters.push((start,end));
     }
+    clusters
+}
+
+pub fn canvas_regions(pixels:&[dialogue::UiPixel])->(Vec<[i32;4]>,usize){
+    let width=dialogue::LAYER_WIDTH;
+    let clusters=row_clusters(pixels);
     let mut regions=Vec::new();let mut top=0;
     for (index,&(y0,y1)) in clusters.iter().enumerate() {
         let column=|x:usize|(y0..y1).any(|y|pixels[y*width+x].visible());
@@ -44,9 +51,27 @@ pub fn pieces(bus:&MemMap,band:Band,world:Band,index:usize)->Vec<Layout>{
         let (regions,top)=canvas_regions(&state.pixels);
         if regions.len()>1 && regions.len()<=UI_SLOTS {return Layout::split(band,state.style.scale,&regions,top);}
     }
-    // Shop lists leave holes where the game draws values in the world BG: keep
-    // that canvas exactly over the native picture so the holes line up.
-    let band=if index==0&&docked&&state.shop_layout{world}else{band};
+    // Shop lists (their stat digits are captured with the canvas, see ppu.rs
+    // shop_numeral) dock to the bottom so the shop artwork above stays visible;
+    // a separate dialogue-sized block at the top (the trader's reply) stays on top.
+    if index==0 && docked && state.shop_layout {
+        if let Some(bounds)=dialogue::pixel_bounds(&state.pixels) {
+            let clusters=row_clusters(&state.pixels);
+            let header=clusters.first().filter(|&&(y0,y1)|clusters.len()>1 && y0<8 && y1-y0<=72).copied();
+            let Some((_,header_end))=header else {
+                return vec![Layout::at_corner(band,false,true,state.style.scale,state.style.length,bounds)];
+            };
+            let rest_top=clusters[1].0 as i32;
+            let head=Layout::split(band,state.style.scale,&[[bounds[0],0,bounds[2],header_end as i32]],1);
+            let rest=[bounds[0],rest_top,bounds[2],bounds[3]];
+            let mut lower=Layout::at_corner(band,false,true,state.style.scale,state.style.length,rest);
+            let k=lower.rect[3]/160.;
+            lower.clip=[lower.rect[0]+(rest[0]+120) as f32*k,lower.rect[1]+rest[1] as f32*k,
+                (rest[2]-rest[0]) as f32*k,(rest[3]-rest[1]) as f32*k];
+            return head.into_iter().chain([lower]).collect();
+        }
+    }
+    let _=world;
     layout(bus,band,index).into_iter().collect()
 }
 

@@ -64,6 +64,16 @@ repository root is not changed; only `AndroidPort/` is.
     can be tapped; measured: a tap on the culled flower town sends Marche.
   - Landscape: 2131-frame world map session hash-identical before/after.
 
+## Done (0.29-android-preview)
+
+- **Shop buy/sell lists dock to the bottom in portrait** so the shop artwork
+  stays visible. Their stat values are host-drawn digit objects (OBJ tiles
+  0x2c0-0x2d3, priority 0) that the UI capture now takes with the canvas
+  (`ppu.rs shop_numeral`); tiles 0x00-0x19 priority 2 are the characters.
+  A separate dialogue-sized block at the canvas top (the trader's reply)
+  stays docked on top. Measured: Down and taps on the moved list update the
+  values; a tap on an equipped item gets the game's "can't sell" reply.
+
 ## Measured with the headless runner (USA ROM, new game, 1080x2400)
 
 - Opening scene and the snowball-fight battle render the extended map above

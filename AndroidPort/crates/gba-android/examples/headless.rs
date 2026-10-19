@@ -338,6 +338,13 @@ fn main() -> Result<(), String> {
                 write_png(&out.join(format!("{name}.native.png")), 240, 160, &native).map_err(|e| e.to_string())?;
                 let io = &engine.machine.bus.io;
                 let r = |o: usize| u16::from_le_bytes([io[o], io[o + 1]]);
+                if let Some(active) = &engine.machine.bus.ffta_sprites.active {
+                    for h in active {
+                        let [a0, a1, a2] = h.attrs;
+                        eprintln!("host x={} y={} a0={a0:04x} a1={a1:04x} a2={a2:04x} tile={:#x} prio={} slot={}",
+                            h.x, h.y, a2 & 1023, (a2 >> 10) & 3, h.slot);
+                    }
+                }
                 eprintln!("dispcnt {:04x} bgcnt {:04x} {:04x} {:04x} {:04x} hofs {} {} {} {} vofs {} {} {} {}",
                     r(0), r(8), r(10), r(12), r(14), r(16), r(20), r(24), r(28), r(18), r(22), r(26), r(30));
             }

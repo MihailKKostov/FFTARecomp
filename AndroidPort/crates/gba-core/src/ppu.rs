@@ -2239,6 +2239,15 @@ fn render_host_tile_row(
     }
 }
 
+/// Measured USA shop lists: stat values are host-drawn 8x8 digit objects
+/// (OBJ tiles 0x2c0-0x2d3, two per digit, priority 0) shown through holes in
+/// the panel. Capturing them with the canvas lets the frontend move the list
+/// without leaving the numbers over the shop artwork.
+fn shop_numeral([a0, a1, a2]: [u16; 3]) -> bool {
+    a0 & 0x300 == 0 && a0 >> 14 == 0 && a1 >> 14 == 0
+        && a2 & 0x0c00 == 0 && (0x2c0..=0x2d3).contains(&(a2 & 1023))
+}
+
 fn ffta_action_foreground(mem: &MemMap, bg: usize) -> bool {
     // Measured action HUD: BG2 carries portrait/level lettering and meter
     // outlines; BG3 carries the panel backing. Extending BG2's edge rows
@@ -2894,6 +2903,7 @@ fn render_sprites_extent(
             crate::ffta_dialogue::portrait([a0,a1,a2],x)
                 || crate::ffta_dialogue::continuation([a0,a1,a2])
                 || (mem.ffta_dialogue.shop_layout && a2&0x0c00==0 && (0x120..=0x12f).contains(&(a2&1023)))
+                || (mem.ffta_dialogue.shop_layout && shop_numeral([a0,a1,a2]))
                 || (a1&0xfe00==0 && ((a0&0xff00==0x4000 && (0x120..=0x123).contains(&(a2&1023)))
                 || (a0&0xff00==0 && (0x124..=0x127).contains(&(a2&1023)))))
         } else {crate::ffta_dialogue::portrait([a0,a1,a2],x) || crate::ffta_dialogue::continuation([a0,a1,a2])};
