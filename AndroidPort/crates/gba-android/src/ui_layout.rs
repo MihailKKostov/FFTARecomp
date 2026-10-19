@@ -78,6 +78,38 @@ impl Layout {
         let top = if bottom { y + h - bounds[3] as f32 * k } else { y - bounds[1] as f32 * k };
         Self { rect: [(left - 120. * k).round(), top.round(), 480. * k, 160. * k], clip: [x, y, w, h] }
     }
+    /// Portrait docking frame: one native canvas cut into `regions` (native
+    /// coordinates, x relative to the 240-wide screen), each drawn as its own
+    /// clipped copy. The first `top` regions keep their place under the frame's
+    /// top edge; the largest remaining region moves to the lower right, inset
+    /// from the edge where a right thumb rests; any others go to the bottom
+    /// right corner, stacked upwards.
+    pub fn split(band: Band, size: f32, regions: &[[i32; 4]], top: usize) -> Vec<Self> {
+        let Band { s, x, y, w, h } = band;
+        let k = s * size.clamp(0.5, 2.);
+        let canvas_left = x + w * 0.5 - 240. * k;
+        let piece = |r: [i32; 4], left: f32, top: f32| {
+            let (pw, ph) = ((r[2] - r[0]) as f32 * k, (r[3] - r[1]) as f32 * k);
+            let clip = [left.round(), top.round(), pw.round(), ph.round()];
+            Self { rect: [(left - (r[0] + 120) as f32 * k).round(), (top - r[1] as f32 * k).round(), 480. * k, 160. * k], clip }
+        };
+        let mut out: Vec<Self> = regions[..top.min(regions.len())].iter()
+            .map(|&r| piece(r, canvas_left + (r[0] + 120) as f32 * k, y + r[1] as f32 * k)).collect();
+        let mut lower: Vec<[i32; 4]> = regions[top.min(regions.len())..].to_vec();
+        lower.sort_by_key(|r| std::cmp::Reverse((r[2] - r[0]) * (r[3] - r[1])));
+        let mut corner_bottom = y + h - 0.01 * h;
+        for (i, r) in lower.into_iter().enumerate() {
+            let (pw, ph) = ((r[2] - r[0]) as f32 * k, (r[3] - r[1]) as f32 * k);
+            if i == 0 {
+                out.push(piece(r, (x + w - 0.08 * w - pw).max(x), (y + 0.80 * h - ph).max(y)));
+            } else {
+                corner_bottom -= ph;
+                out.push(piece(r, (x + w - 0.02 * w - pw).max(x), corner_bottom.max(y)));
+                corner_bottom -= 0.01 * h;
+            }
+        }
+        out
+    }
     pub fn source(&self, x: f32, y: f32) -> Option<usize> {
         if x < self.clip[0]
             || y < self.clip[1]
@@ -110,6 +142,27 @@ mod tests {
         let top = Layout::new_with_anchor(docked, false, 1., [0., 0.], 0.);
         assert_eq!(top.rect[1], 120.);
         assert_eq!(b.clip, [0., 120., 1080., 2180.]);
+    }
+    #[test]
+    fn split_keeps_the_header_on_top_and_moves_the_menu_to_the_thumb_zone() {
+        let band = Band::docked((1080, 2400), 240., 160., 2340.);
+        let dialogue = [0, 4, 240, 66];
+        let menu = [0, 78, 96, 142];
+        let funds = [162, 137, 240, 157];
+        let pieces = Layout::split(band, 1., &[dialogue, menu, funds], 1);
+        assert_eq!(pieces.len(), 3);
+        // Header: canvas row 4 sits 4 native rows under the frame top, full width.
+        assert_eq!(pieces[0].clip, [0., (160. + 4. * 4.5f32).round(), 1080., (62. * 4.5f32).round()]);
+        // Menu: inset from the right edge, bottom at 80% of the frame.
+        let m = pieces[1].clip;
+        assert!((1080. - (m[0] + m[2]) - 0.08 * 1080.).abs() <= 1.);
+        assert!((m[1] + m[3] - (160. + 0.80 * 2180.)).abs() <= 1.);
+        // The menu's own pixels map back to the canvas: its top-left source is (120+0, 78).
+        assert_eq!(pieces[1].source(m[0] + 1., m[1] + 1.), Some(78 * 480 + 120));
+        // Funds: bottom right corner, below the menu.
+        let f = pieces[2].clip;
+        assert!(f[1] > m[1] + m[3]);
+        assert!(1080. - (f[0] + f[2]) < 0.03 * 1080.);
     }
     #[test]
     fn short_or_invalid_frames_fall_back_to_the_letterbox() {

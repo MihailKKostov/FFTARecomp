@@ -16,7 +16,7 @@
 //!   tap <frame> <x> <y> [back]                       x/y as 0..1 fractions of the screen
 //!   shot <frame> <name>
 //!   speed <frame> <N>                                frames per engine call from then on (1-8)
-//!   dump <frame> <name>                              writes <out>/<name>.ewram and .iwram
+//!   dump <frame> <name>                              writes <out>/<name>.ewram/.iwram/.oam/.io
 //!   end <frame>
 use gba_android::engine::{Engine, KEYS};
 use std::{path::PathBuf, sync::atomic::Ordering};
@@ -130,19 +130,31 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
         }
     }
     let mut packed = vec![0u8; 480 * 160 * 4 * 2];
-    let mut params = [0f32; 20];
+    let mut params = [0f32; 40];
     let mut background = vec![0i32; ww * wh];
     engine.export_ui(&mut packed, &mut params, &mut background);
+    if let Some(prefix) = std::env::var_os("FFTA_UI_DUMP") {
+        // Both native UI layers as 480x160 images (magenta where transparent).
+        for layer in 0..2 {
+            let rgb: Vec<u8> = packed[layer * 480 * 160 * 4..(layer + 1) * 480 * 160 * 4].chunks_exact(4).flat_map(|d| {
+                if d[2] == 0 && d[3] == 16 { return [255, 0, 255]; }
+                let code = d[0] as u32 | (d[1] as u32) << 8;
+                [(code & 31) as u8 * 8, ((code >> 5) & 31) as u8 * 8, ((code >> 10) & 31) as u8 * 8]
+            }).collect();
+            let _ = write_png(&PathBuf::from(format!("{}-layer{layer}.png", prefix.to_string_lossy())), 480, 160, &rgb);
+        }
+    }
     if std::env::var_os("FFTA_UI_DEBUG").is_some() {
         let state = &engine.machine.bus.ffta_dialogue;
-        eprintln!("ui params {params:?}\n  main {:?} extra {:?} kind {:?} action {} town {} shop {}",
+        eprintln!("ui params {params:?}\n  main {:?} extra {:?} kind {:?} action {} town {} shop {} site {} expanded {} padded {}",
             gba_core::ffta_dialogue::pixel_bounds(&state.pixels), gba_core::ffta_dialogue::pixel_bounds(&state.extra.pixels),
-            state.extra.kind, state.action_layout, state.town_layout, state.shop_layout);
+            state.extra.kind, state.action_layout, state.town_layout, state.shop_layout, state.site_layout, engine.expanded, engine.padded);
     }
-    for layer in 0..2 {
-        let p = &params[layer * 9..layer * 9 + 9];
+    for slot in 0..4 {
+        let p = &params[slot * 9..slot * 9 + 9];
+        let layer = (p[8] as usize) % 2;
         if p[2] <= 0. { continue; }
-        let stats = p[8] > 0.;
+        let stats = p[8] >= 2.;
         let (x0, y0) = (p[0].max(p[4]).max(0.) as usize, p[1].max(p[5]).max(0.) as usize);
         let x1 = ((p[0] + p[2]).min(p[4] + p[6]).min(sw as f32)) as usize;
         let y1 = ((p[1] + p[3]).min(p[5] + p[7]).min(sh as f32)) as usize;
@@ -304,6 +316,8 @@ fn main() -> Result<(), String> {
         for name in dumps {
             std::fs::write(out.join(format!("{name}.ewram")), &engine.machine.bus.ewram).map_err(|e| e.to_string())?;
             std::fs::write(out.join(format!("{name}.iwram")), &engine.machine.bus.iwram).map_err(|e| e.to_string())?;
+            std::fs::write(out.join(format!("{name}.oam")), &engine.machine.bus.oam).map_err(|e| e.to_string())?;
+            std::fs::write(out.join(format!("{name}.io")), &engine.machine.bus.io).map_err(|e| e.to_string())?;
         }
         if !shots.is_empty() { engine.set_view(screen, view.extra_x, view.extra_y, true); }
         for name in shots {

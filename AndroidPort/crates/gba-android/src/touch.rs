@@ -2,6 +2,54 @@
 use gba_core::{ffta_battle_mouse as battle, ffta_dialogue::{self as dialogue,PanelKind}, mem::{self,MemMap}};
 use crate::{engine::Engine,ui_layout::{Band,Layout}};
 
+/// Up to this many clipped pieces are exported per frame (GameSurface slots).
+pub const UI_SLOTS:usize=4;
+
+/// Visible blocks of a native UI canvas: row clusters split at empty rows,
+/// then each split at empty columns. Native coordinates (x relative to the
+/// 240-wide screen). Returns the blocks and how many belong to the top cluster.
+pub fn canvas_regions(pixels:&[dialogue::UiPixel])->(Vec<[i32;4]>,usize){
+    let (width,height)=(dialogue::LAYER_WIDTH,pixels.len()/dialogue::LAYER_WIDTH);
+    let row=|y:usize|pixels[y*width..(y+1)*width].iter().any(|p|p.visible());
+    let mut clusters=Vec::new();let mut y=0;
+    while y<height {
+        if !row(y){y+=1;continue;}
+        let start=y;let mut end=y+1;let mut gap=0;y+=1;
+        while y<height&&gap<4 {if row(y){end=y+1;gap=0}else{gap+=1}y+=1;}
+        clusters.push((start,end));
+    }
+    let mut regions=Vec::new();let mut top=0;
+    for (index,&(y0,y1)) in clusters.iter().enumerate() {
+        let column=|x:usize|(y0..y1).any(|y|pixels[y*width+x].visible());
+        let mut x=0;
+        while x<width {
+            if !column(x){x+=1;continue;}
+            let start=x;let mut end=x+1;let mut gap=0;x+=1;
+            while x<width&&gap<8 {if column(x){end=x+1;gap=0}else{gap+=1}x+=1;}
+            regions.push([start as i32-dialogue::LAYER_INSET,y0 as i32,end as i32-dialogue::LAYER_INSET,y1 as i32]);
+            if index==0&&y0<40 {top+=1;}
+        }
+    }
+    (regions,top)
+}
+
+/// Screen pieces of UI layer `index`. Portrait battle-style scenes split town,
+/// shop and site canvases so the speaker stays on top and the choices sit in
+/// the right thumb's reach; everything else is one piece.
+/// `world` is the screen rectangle of the native 240x160 picture inside the world texture.
+pub fn pieces(bus:&MemMap,band:Band,world:Band,index:usize)->Vec<Layout>{
+    let state=&bus.ffta_dialogue;
+    let docked=band.h>160.*band.s+0.5;
+    if index==0 && docked && (state.town_layout||state.site_layout) && !state.shop_layout && state.layer().is_some() {
+        let (regions,top)=canvas_regions(&state.pixels);
+        if regions.len()>1 && regions.len()<=UI_SLOTS {return Layout::split(band,state.style.scale,&regions,top);}
+    }
+    // Shop lists leave holes where the game draws values in the world BG: keep
+    // that canvas exactly over the native picture so the holes line up.
+    let band=if index==0&&docked&&state.shop_layout{world}else{band};
+    layout(bus,band,index).into_iter().collect()
+}
+
 pub fn layout(bus:&MemMap,band:Band,index:usize)->Option<Layout>{
     let state=&bus.ffta_dialogue;
     let size=state.style.scale;
@@ -60,6 +108,11 @@ mod tests {
 impl Engine {
     /// Portrait battles dock panels to the frame Kotlin reserves; every other
     /// scene keeps the letterboxed 160-row band that matches the game picture.
+    /// Where the native 240x160 picture is drawn inside the world texture.
+    pub fn world_band(&self)->Band{
+        let s=self.world_rect[2]/mem::render_width() as f32;
+        Band{s,x:self.world_rect[0]+mem::extra() as f32*s,y:self.world_rect[1]+mem::extra_y() as f32*s,w:240.*s,h:160.*s}
+    }
     pub fn ui_band(&self)->Band{
         match self.ui_dock {
             Some((top,bottom)) if self.expanded => Band::docked(self.ui_window,self.ui_base,top,bottom),
@@ -89,7 +142,7 @@ impl Engine {
         let mut handled=false;
         if (battle::MenuScene::read(&self.machine.bus).is_some()||state.shop_layout)&&index.is_some(){
             let i=index.unwrap();
-            if let Some(source)=layout(&self.machine.bus,band,i).and_then(|l|l.source(px,py)){
+            if let Some(source)=pieces(&self.machine.bus,band,self.world_band(),i).iter().find_map(|l|l.source(px,py)){
                 let mut nx=(source%480) as f32-120.;let ny=(source/480) as f32;
                 if !(state.town_layout||state.shop_layout||state.site_layout||state.extra.kind==PanelKind::Notice){
                     let bounds=if i==0{dialogue::panel_bounds(&state.pixels,&state.backing)}else{dialogue::panel_bounds(&state.extra.pixels,&state.extra.backing)};
@@ -118,17 +171,23 @@ impl Engine {
         eprintln!("FFTA_TOUCH click x={x:.3} y={y:.3} handled={handled}");
     }
     pub fn export_ui(&self,packed:&mut [u8],params:&mut [f32],background:&mut [i32]){
+        // Slots of 9 floats: rect, clip, layer + 2 when it blends over the stats background.
         params.fill(0.);
-        if let Some(flag)=params.get_mut(18){*flag=if self.padded{1.}else{0.};}
+        if let Some(flag)=params.get_mut(UI_SLOTS*9){*flag=if self.padded{1.}else{0.};}
         let band=self.ui_band();
+        let mut slot=0;
         for i in 0..2 {
-            let Some(layout)=layout(&self.machine.bus,band,i)else{continue;};
+            let layouts=pieces(&self.machine.bus,band,self.world_band(),i);
+            if layouts.is_empty(){continue;}
             let state=&self.machine.bus.ffta_dialogue;
             let pixels=if i==0{&state.pixels}else{&state.extra.pixels};
-            params[i*9..i*9+4].copy_from_slice(&layout.rect);
-            params[i*9+4..i*9+8].copy_from_slice(&layout.clip);
             let stats=i==1&&state.extra.kind==PanelKind::Stats;
-            params[i*9+8]=if stats{1.}else{0.};
+            for layout in layouts.iter().take(UI_SLOTS-slot) {
+                params[slot*9..slot*9+4].copy_from_slice(&layout.rect);
+                params[slot*9+4..slot*9+8].copy_from_slice(&layout.clip);
+                params[slot*9+8]=i as f32+if stats{2.}else{0.};
+                slot+=1;
+            }
             let offset=i*480*160*4;
             for (target,pixel) in packed[offset..offset+480*160*4].chunks_exact_mut(4).zip(pixels){target.copy_from_slice(&pixel.packed());}
             if stats {

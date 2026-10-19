@@ -16,6 +16,10 @@ import java.util.concurrent.locks.LockSupport
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
+/** UI piece slots exported per frame (touch.rs UI_SLOTS), 9 floats each, then the padded-frame flag. */
+private const val UI_SLOTS=4
+private const val UI_PARAMS=UI_SLOTS*9+4
+
 /** Simulation and audio run together off the UI thread; GL only uploads completed frames. */
 class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceView(context) {
     companion object { val deliveredClicks=AtomicInteger(0) }
@@ -264,7 +268,7 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
 
 private class UiBuffers(bytes:Int){
     val pixels:ByteBuffer=ByteBuffer.allocateDirect(480*160*4*2).order(ByteOrder.nativeOrder())
-    val params=FloatArray(20)
+    val params=FloatArray(UI_PARAMS)
     var background:ByteBuffer=ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
         private set
     fun resize(bytes:Int){if(background.capacity()!=bytes)background=ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())}
@@ -276,7 +280,7 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
     private data class PublishedFrame(val pixels:ByteBuffer,val view:ViewConfig,val ui:UiBuffers)
     private val mailbox=FrameMailbox<PublishedFrame>()
     private var uploadedView:ViewConfig?=null
-    private val uploadedUiParams=FloatArray(20)
+    private val uploadedUiParams=FloatArray(UI_PARAMS)
     @Volatile var screenWidth = 2280
         private set
     @Volatile var screenHeight = 1080
@@ -400,12 +404,12 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
             pending.ui.let{ui->
                 ui.params.copyInto(uploadedUiParams)
                 val uiParams=uploadedUiParams
-                for(i in 0..1)if(uiParams[i*9+2]>0f){
-                    ui.pixels.position(i*480*160*4)
-                    glBindTexture(GL_TEXTURE_2D,uiTextures[i])
+                for(layer in 0..1)if((0 until UI_SLOTS).any{uiParams[it*9+2]>0f && uiParams[it*9+8].toInt()%2==layer}){
+                    ui.pixels.position(layer*480*160*4)
+                    glBindTexture(GL_TEXTURE_2D,uiTextures[layer])
                     glTexSubImage2D(GL_TEXTURE_2D,0,0,0,480,160,GL_RGBA,GL_UNSIGNED_BYTE,ui.pixels)
                 }
-                if(uiParams[17]>0f){
+                if((0 until UI_SLOTS).any{uiParams[it*9+2]>0f && uiParams[it*9+8]>=2f}){
                     ui.background.position(0)
                     glBindTexture(GL_TEXTURE_2D,uiTextures[2])
                     if(bgWidth!=config.width||bgHeight!=config.height){
@@ -425,7 +429,7 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
         var width = (view.width*scale).toInt(); var height=(view.height*scale).toInt()
         var left=(screenWidth-width)/2; var bottom=(screenHeight-height)/2
         glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,texture)
-        val padded=uiParams[18]>0f && view.extraY>0 && backdropProgram!=0
+        val padded=uiParams[UI_SLOTS*9]>0f && view.extraY>0 && backdropProgram!=0
         // Portrait/square views extend only 8 columns, which hold wrapped map leftovers outside
         // battles; wider landscape views keep their real widescreen columns.
         val cropX=view.extraX<=8
@@ -484,9 +488,10 @@ private class FrameRenderer(private val onError: (String) -> Unit) : GLSurfaceVi
             vertices.position(0);uv.position(0)
             glVertexAttribPointer(uiPosition,2,GL_FLOAT,false,0,vertices)
             glVertexAttribPointer(uiCoordinates,2,GL_FLOAT,false,0,uv)
-            for(i in 0..1)if(uiParams[i*9+2]>0f){
-                glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,if(uiParams[i*9+8]>0f)uiTextures[2]else texture)
-                glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,uiTextures[i])
+            // Each slot is one clipped piece of UI layer (meta % 2); meta >= 2 blends over the stats background.
+            for(i in 0 until UI_SLOTS)if(uiParams[i*9+2]>0f){
+                glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,if(uiParams[i*9+8]>=2f)uiTextures[2]else texture)
+                glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,uiTextures[uiParams[i*9+8].toInt()%2])
                 glUniform4fv(glGetUniformLocation(uiProgram,"rect"),1,uiParams,i*9)
                 glUniform4fv(glGetUniformLocation(uiProgram,"clip"),1,uiParams,i*9+4)
                 glDrawArrays(GL_TRIANGLE_STRIP,0,4)

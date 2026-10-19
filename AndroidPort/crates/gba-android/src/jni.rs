@@ -2,6 +2,9 @@ use crate::engine::{self, Engine, ENGINE, KEYS, STATUS};
 use jni_sys::*;
 use std::{path::PathBuf, sync::atomic::Ordering};
 
+/// UI piece slots (9 floats each) followed by the padded-frame flag; GameSurface mirrors it.
+const UI_PARAMS:usize=crate::touch::UI_SLOTS*9+4;
+
 fn guarded(action: impl FnOnce() -> Result<i32, String>) -> i32 {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
         Ok(Ok(value)) => value,
@@ -97,16 +100,16 @@ pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaFrame(
         if ui.is_null() || ui_background.is_null() || ui_params.is_null()
             || api.GetDirectBufferCapacity.unwrap()(env,ui)<(480*160*4*2) as i64
             || api.GetDirectBufferCapacity.unwrap()(env,ui_background)<size as i64*4
-            || api.GetArrayLength.unwrap()(env,ui_params)<20 {return Err("Invalid UI buffers".into());}
+            || api.GetArrayLength.unwrap()(env,ui_params)<UI_PARAMS as i32 {return Err("Invalid UI buffers".into());}
         let ui_ptr=api.GetDirectBufferAddress.unwrap()(env,ui) as *mut u8;
         let bg_ptr=api.GetDirectBufferAddress.unwrap()(env,ui_background) as *mut i32;
         if ui_ptr.is_null()||bg_ptr.is_null(){return Err("Expected direct UI buffers".into());}
-        let mut params=[0f32;20];
+        let mut params=[0f32;UI_PARAMS];
         let ui_start=engine.machine.bus.ffta_dialogue.profile.enabled.then(std::time::Instant::now);
         engine.export_ui(std::slice::from_raw_parts_mut(ui_ptr,480*160*4*2),&mut params,
             std::slice::from_raw_parts_mut(bg_ptr,size as usize));
         if let Some(start)=ui_start {engine.ui_export_ns=start.elapsed().as_nanos() as u64;}
-        api.SetFloatArrayRegion.unwrap()(env,ui_params,0,20,params.as_ptr());
+        api.SetFloatArrayRegion.unwrap()(env,ui_params,0,UI_PARAMS as i32,params.as_ptr());
         let count = engine.audio.len().min(4096) as i32;
         if count > 0 { api.SetShortArrayRegion.unwrap()(env,audio,0,count,engine.audio.as_ptr()); }
         if api.ExceptionCheck.unwrap()(env) != 0 { return Err("Cannot copy frame data".into()); }
