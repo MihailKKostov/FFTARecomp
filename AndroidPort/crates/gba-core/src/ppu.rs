@@ -116,7 +116,7 @@ pub fn ffta_zoom_rows_ready(mem: &MemMap) -> bool {
 /// Docked (portrait) town scene: shop, pub, prison... Measured USA: the whole
 /// scene keeps the town-menu BG control that MenuScene::layout_menus requires
 /// (BG0/BG1 the picture, BG2/BG3 the menu planes).
-fn docked_town_scene(mem: &MemMap) -> bool {
+pub fn docked_town_scene(mem: &MemMap) -> bool {
     mem.ffta_dialogue.docked && mem.ffta_dialogue.separate && io16(mem, 0) & 0x0f07 == 0x0f00
         && [8, 10, 12, 14].map(|o| io16(mem, o)) == [0x4c03, 0x4e02, 0x0b08, 0x0a08]
 }

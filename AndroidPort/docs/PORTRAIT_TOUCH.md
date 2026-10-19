@@ -126,6 +126,43 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.36-android-preview
+
+**Resume where the game was left.** gba-core `savestate.rs` stores the whole
+machine between frames: CPU (all banks), every memory region and I/O
+register, timers, DMA, interrupt and video timing, PSG channels and FIFOs,
+the backup chip and RTC, and the battle map origins; the engine adds the
+portrait caches (remembered towns, the party picture). Measured: running on
+from a restored state gives identical memory and screens to running on
+uninterrupted (world map, Party screens, mid-battle; interpreted and native),
+and the first frame after a relaunch is the frame that was left.
+`ffta.resume` (next to `ffta.sav`) is written before any changed battery
+save, every 600 frames, and on pause, onStop, exit and errors, through a
+synced temp file and a rename. On launch the game continues from it; an
+unusable one is kept as `.resume.bad` and the battery save is used. Import
+save removes it. Measured: an in-game save made 200 frames before a crash
+(no checkpoint) is there after the relaunch.
+
+**Game-style buttons in the bottom HUD row** (`game_buttons.rs`): the menu
+window's bar, translucent body and item gem with the label in the game's menu
+font and colours (font and palettes read from the ROM; the five window tiles
+are byte copies of what the game loads into VRAM). World map: Menu (Start; B
+while a menu is open, then highlighted). Party screens: Return (B), the unit
+screen sits one row higher. Town scenes: Return (B) and, while the shop shows
+its "R Info" hint (OAM tiles 0x2d4-0x2d9), Info (R, opens and closes the item
+info). In town scenes the docked windows move up one row to keep the row free.
+
+**Party grid:** three to a row in the roster's zig-zag (every other row half
+a step right), rows spread to fill the upper half; a party taller than the
+half scrolls with a drag on the grid (`gbaDragStarts`/`gbaDrag`).
+
+**Direct unit selection.** The selection is a row and column (EWRAM 0xfd2a,
+0xfd29; index = row * 4 + column at 0xfd3e, recomputed every frame by the
+routine at 0x08072f22). On the roster a tap sets them and the game's cursor
+glides straight to the unit, then A; unit screens only switch on Left/Right,
+so the unit next to the target is set and one Right (Left) switches straight
+to it with the game's own single slide.
+
 **Party screens as one layout (0.35)** (`menu_layout.rs`). The upper half
 always shows the whole party; the lower half the selected unit (the roster's
 unit panel, or the unit's status, Equip, Abilities, Jobs screen in one piece,

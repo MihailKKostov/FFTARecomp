@@ -10,6 +10,6 @@ mod ui_layout;
 pub mod touch;
 mod title_touch;
 mod world_map;
-mod map_menu;
+pub mod game_buttons;
 pub mod menu_layout;
 mod scheduling;

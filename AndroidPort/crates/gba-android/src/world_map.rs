@@ -37,8 +37,6 @@ pub(crate) fn faded(bus: &MemMap, color: u16, target: u16) -> u16 {
 #[derive(Default)]
 pub struct WorldMap {
     towns: Vec<Town>,
-    /// The Menu button was drawn with the game's resources this frame (map_menu.rs).
-    pub button: bool,
 }
 
 fn half(data: &[u8], offset: usize) -> u16 { u16::from_le_bytes([data[offset], data[offset + 1]]) }
@@ -138,7 +136,7 @@ impl WorldMap {
             if !indices.is_empty() && indices.len() != 32 * 32 { return Err("Bad town pixels".into()); }
             towns.push(Town { x, y, key, indices, stable: r.u16()?, missing: r.u16()?, seen: r.bool()? });
         }
-        Ok(WorldMap { towns, button: false })
+        Ok(WorldMap { towns })
     }
     /// Rows the texture is shifted by (displayed row r shows rendered row r + shift).
     pub fn shift(bus: &MemMap) -> i32 {
@@ -238,8 +236,6 @@ impl WorldMap {
                 }
             }
         }
-        // Touch-only Menu button in the pinned bottom HUD row.
-        self.button = crate::map_menu::draw(bus, &mut out, rw, rh, ex as usize, dock.1 - 160, bus.world_hud.menu);
         *pixels = out;
     }
 }

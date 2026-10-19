@@ -161,7 +161,7 @@ pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaMenuButto
     let api=&**env;
     if api.GetArrayLength.unwrap()(env,out)<4{return 0;}
     // Only when the game picture could not carry the button itself.
-    let rect=ENGINE.lock().ok().and_then(|lock|lock.as_ref().and_then(|engine|engine.menu_button.filter(|_|!engine.menu_button_in_game)));
+    let rect=ENGINE.lock().ok().and_then(|lock|lock.as_ref().and_then(|engine|engine.menu_button));
     match rect {
         Some(rect)=>{api.SetFloatArrayRegion.unwrap()(env,out,0,4,rect.as_ptr());1}
         None=>0,
@@ -191,6 +191,16 @@ pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaCheckpoint(_: *m
         if let Some(engine) = ENGINE.lock().map_err(|_|"Engine mutex poisoned")?.as_mut() { engine.checkpoint()?; }
         Ok(1)
     })
+}
+
+/// Touch-only drag: true when it starts on the scrollable party grid.
+#[no_mangle]
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaDragStarts(_: *mut JNIEnv,_:jobject,x:jfloat,y:jfloat)->jboolean{
+    ENGINE.lock().ok().and_then(|lock|lock.as_ref().map(|engine|engine.party_drag_starts(x,y) as jboolean)).unwrap_or(0)
+}
+#[no_mangle]
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaDrag(_: *mut JNIEnv,_:jobject,dy:jfloat){
+    if let Ok(mut lock)=ENGINE.lock(){if let Some(engine)=lock.as_mut(){engine.party_drag(dy);}}
 }
 
 /// After loading the ROM: continue where the game was left (1), or start from the battery save (0).

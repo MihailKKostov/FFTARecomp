@@ -23,7 +23,7 @@ use std::{path::PathBuf, sync::atomic::Ordering};
 
 const BUTTONS: [&str; 10] = ["A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L"];
 
-enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String), Speed(u64), Dump(String), State(String), Checkpoint, Save }
+enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String), Speed(u64), Dump(String), State(String), Checkpoint, Save, Poke(usize, Vec<u8>) }
 
 struct View { extra_x: usize, extra_y: usize, base_width: f32 }
 
@@ -69,6 +69,13 @@ fn parse_script(text: &str) -> Result<(Vec<(u64, Event)>, Option<u64>), String> 
             "shot" => events.push((frame, Event::Shot(parts.get(2).ok_or_else(error)?.to_string()))),
             "dump" => events.push((frame, Event::Dump(parts.get(2).ok_or_else(error)?.to_string()))),
             "checkpoint" => events.push((frame, Event::Checkpoint)),
+            // poke FRAME EWRAM_OFFSET_HEX BYTES_HEX (debugging guest state)
+            "poke" => {
+                let offset = usize::from_str_radix(parts.get(2).ok_or_else(error)?, 16).map_err(|_| error())?;
+                let text = parts.get(3).ok_or_else(error)?;
+                let bytes = (0..text.len() / 2).map(|i| u8::from_str_radix(&text[2 * i..2 * i + 2], 16)).collect::<Result<Vec<_>, _>>().map_err(|_| error())?;
+                events.push((frame, Event::Poke(offset, bytes)));
+            }
             "save" => events.push((frame, Event::Save)),
             "state" => events.push((frame, Event::State(parts.get(2).ok_or_else(error)?.to_string()))),
             "speed" => events.push((frame, Event::Speed(parts.get(2).and_then(|v| v.parse::<u64>().ok()).ok_or_else(error)?.clamp(1, 8)))),
@@ -165,6 +172,7 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
             }
             eprintln!("  party lower_shift {} lower_start {} -> screen y {:.3}", layout.lower_shift, layout.lower_start, to_screen(0, layout.lower_shift).1);
         }
+        for (button, r) in &engine.buttons { eprintln!("  button {} at ({:.3}, {:.3})", button.label, (r[0] + r[2] / 2.) / screen.0 as f32, (r[1] + r[3] / 2.) / screen.1 as f32); }
         eprintln!("  blocks {:?}", gba_android::touch::canvas_blocks(&state.pixels).iter().map(|b| b.0).collect::<Vec<_>>());
     }
     for slot in 0..8 {
@@ -196,7 +204,7 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
         }
     }
     // Touch-only Menu button the app draws over the world map (TouchKey colours).
-    if let Some([bx, by, bw, bh]) = engine.menu_button.filter(|_| !engine.menu_button_in_game) {
+    if let Some([bx, by, bw, bh]) = engine.menu_button {
         let (sw, sh) = (screen.0 as usize, screen.1 as usize);
         for y in by.max(0.) as usize..((by + bh) as usize).min(sh) {
             for x in bx.max(0.) as usize..((bx + bw) as usize).min(sw) {
@@ -339,6 +347,12 @@ fn main() -> Result<(), String> {
                 Event::State(path) => std::fs::write(path, engine.save_state()).map_err(|e| e.to_string())?,
                 Event::Checkpoint => engine.checkpoint()?,
                 Event::Save => engine.save()?,
+                Event::Poke(address, bytes) => {
+                    // A GBA address (02xxxxxx EWRAM, 03xxxxxx IWRAM) or a bare EWRAM offset.
+                    let bus = &mut engine.machine.bus;
+                    let (region, offset) = match address >> 24 { 3 => (&mut bus.iwram, address & 0x7fff), _ => (&mut bus.ewram, address & 0x3ffff) };
+                    region[offset..offset + bytes.len()].copy_from_slice(bytes);
+                }
             }
         }
         held.retain(|h| h.1 > frame);

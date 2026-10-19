@@ -53,6 +53,9 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
     private var downTime=0L
     private var downX=0f
     private var downY=0f
+    /** The gesture scrolls the Party screen's unit grid (like a list) instead of steering. */
+    private var scrolling=false
+    private var lastY=0f
     // Compose sends touches on its buttons to those buttons, never this underlying View.
     // Only complete single-pointer gestures that began on the game can become clicks.
     // Touch-only mode adds two gestures to single taps: a one-finger drag holds the
@@ -64,15 +67,22 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
         when(event.actionMasked){
             MotionEvent.ACTION_DOWN->{
                 touchingGame=true;dragging=false;twoFinger=false
-                downX=event.x;downY=event.y;downTime=event.eventTime
+                downX=event.x;downY=event.y;downTime=event.eventTime;lastY=event.y
+                scrolling=touchOnly && runCatching{NativeBridge.gbaDragStarts(event.x/width,event.y/height)}.getOrDefault(false)
             }
             MotionEvent.ACTION_POINTER_DOWN->
                 if(touchOnly && touchingGame && !dragging && event.pointerCount==2)twoFinger=true
                 else {touchingGame=false;onDirection(0)}
             MotionEvent.ACTION_MOVE->if(touchOnly && touchingGame && !twoFinger){
                 val dx=event.x-downX;val dy=event.y-downY
-                if(!dragging && dx*dx+dy*dy>=slop*slop)dragging=true
-                if(dragging)onDirection(TouchSelection.direction(dx,dy,slop/2))
+                if(scrolling){
+                    // Lists follow the finger as soon as it clearly moves.
+                    if(!dragging && kotlin.math.abs(dy)>=slop/3)dragging=true
+                    if(dragging){NativeBridge.gbaDrag((event.y-lastY)/height);lastY=event.y}
+                }else{
+                    if(!dragging && dx*dx+dy*dy>=slop*slop)dragging=true
+                    if(dragging)onDirection(TouchSelection.direction(dx,dy,slop/2))
+                }
             }
             MotionEvent.ACTION_CANCEL->endGesture()
             MotionEvent.ACTION_UP->{
@@ -91,8 +101,8 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
         return true
     }
     private fun endGesture(){
-        if(dragging)onDirection(0)
-        touchingGame=false;dragging=false;twoFinger=false
+        if(dragging && !scrolling)onDirection(0)
+        touchingGame=false;dragging=false;twoFinger=false;scrolling=false
     }
     @Volatile var performance = "Starting..."
     @Volatile private var running = false

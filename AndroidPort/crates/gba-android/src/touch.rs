@@ -166,7 +166,11 @@ impl Engine {
     }
     pub fn ui_band(&self)->Band{
         match self.ui_dock {
-            Some((top,bottom)) if self.expanded => Band::docked(self.ui_window,self.ui_base,top,bottom),
+            Some((top,bottom)) if self.expanded => {
+                // Town scenes keep the bottom HUD row free for the game-style buttons.
+                let row=if self.town_buttons() {crate::game_buttons::ROW_HEIGHT as f32*self.world_rect[2]/mem::render_width() as f32} else {0.};
+                Band::docked(self.ui_window,self.ui_base,top,bottom-row)
+            }
             _ => Band::letterbox(self.ui_window,self.ui_base),
         }
     }
@@ -186,14 +190,12 @@ impl Engine {
         if !self.touch_enabled || !x.is_finite() || !y.is_finite() || !(0. ..1.).contains(&x) || !(0. ..1.).contains(&y){return;}
         if back {self.mouse.cancel();battle::back(&mut self.machine.bus);return;}
         let px=x*self.ui_window.0 as f32;let py=y*self.ui_window.1 as f32;
-        // In-game Menu button on the world map: Start opens the game's menu, B closes an open one.
-        if let Some([bx,by,bw,bh])=self.menu_button.filter(|_|self.menu_button_in_game) {
-            if px>=bx && px<bx+bw && py>=by && py<by+bh {
-                self.mouse.cancel();
-                let keys=if self.machine.bus.world_hud.menu {0x3fd} else {0x3f7};
-                battle::press(&mut self.machine.bus,keys);
-                return;
-            }
+        // Buttons drawn into the game picture (game_buttons.rs).
+        if let Some(key)=self.buttons.iter().find(|(_,[bx,by,bw,bh])|px>=*bx && px<bx+bw && py>=*by && py<by+bh).map(|(b,_)|b.key) {
+            self.mouse.cancel();
+            self.party_goal=None;
+            battle::press(&mut self.machine.bus,key);
+            return;
         }
         let band=self.ui_band();
         let state=&self.machine.bus.ffta_dialogue;
@@ -267,7 +269,7 @@ impl Engine {
         }));
         if !text {return true;}
         self.mouse.cancel();
-        self.party_goal=Some(crate::engine::PartyGoal{target:0,forward:true,confirm:true,deadline:self.machine.bus.frames+600,
+        self.party_goal=Some(crate::engine::PartyGoal{target:0,confirm:true,deadline:self.machine.bus.frames+600,
             pressed:None,cursor:[0;4],still:0,row:Some(row+4)});
         true
     }
@@ -282,12 +284,8 @@ impl Engine {
             Template::Unit => false,
             _ => return,
         };
-        let index=self.machine.bus.ewram.get(0xfd3e).copied().unwrap_or(0) as usize;
-        let count=self.party_cache.as_ref().map_or(1,|cache|cache.count()).max(1);
-        // The roster cursor walks the slots; unit screens cycle around the party.
-        let forward=if confirm {target>index} else {(target+count-index)%count<=count/2};
         self.mouse.cancel();
-        self.party_goal=Some(crate::engine::PartyGoal{target,forward,confirm,deadline:self.machine.bus.frames+600,pressed:None,cursor:[0;4],still:0,row:None});
+        self.party_goal=Some(crate::engine::PartyGoal{target,confirm,deadline:self.machine.bus.frames+600,pressed:None,cursor:[0;4],still:0,row:None});
     }
     pub fn export_ui(&self,packed:&mut [u8],params:&mut [f32],background:&mut [i32]){
         // Slots of 9 floats: rect, clip, layer + 2 when it blends over the stats background.

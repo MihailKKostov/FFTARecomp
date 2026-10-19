@@ -7,14 +7,17 @@ pub static STATUS: Mutex<String> = Mutex::new(String::new());
 pub static KEYS: AtomicU32 = AtomicU32::new(0x3ff);
 pub const MAX_STEPS: u64 = 5_000_000;
 pub fn status(message: impl Into<String>) { *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = message.into(); }
+/// Measured USA Party screen selection (EWRAM): column and row bytes, and the
+/// unit index the game derives from them.
+const PARTY_COLUMN:usize=0xfd29;
+const PARTY_INDEX:usize=0xfd3e;
+
 #[derive(Clone,Copy)]
 pub(crate) struct PartyGoal {
     pub target:usize,
-    /// Right (true) or Left: unit screens cycle, so the shorter way round.
-    pub forward:bool,
     pub confirm:bool,
     pub deadline:u64,
-    /// Index and frame of the last press.
+    /// The selection was set (index then, frame).
     pub pressed:Option<(usize,u64)>,
     /// Roster cursor position (EWRAM 0xfd30) and for how many frames it has
     /// not moved: the cursor glides to a unit and A is only taken once it rests.
@@ -56,14 +59,17 @@ pub struct Engine {
     pub(crate) party_cache: Option<crate::menu_layout::PartyCache>,
     /// A unit selected by tap, reached one press at a time (`drive_party_goal`).
     pub(crate) party_goal: Option<PartyGoal>,
+    /// Native rows the party grid is scrolled by (menu_layout.rs).
+    pub(crate) party_scroll: i32,
     /// Last battery save written, and the frame of the last resume state.
     last_battery: Option<Vec<u8>>,
     resume_frame: u64,
-    /// Screen rectangle of the world map Menu button (touch-only portrait), see `map_menu_button`.
+    /// Screen rectangle of the app's own world map Menu button (touch-only
+    /// portrait, only when the game's resources for `buttons` are missing).
     pub menu_button: Option<[f32;4]>,
-    /// The Menu button is drawn in the game picture (map_menu.rs); otherwise
-    /// the app draws its own button at `menu_button`.
-    pub menu_button_in_game: bool,
+    /// Buttons drawn into the game picture this frame (game_buttons.rs) and
+    /// their screen rectangles.
+    pub buttons: Vec<(crate::game_buttons::Button,[f32;4])>,
     /// HUD brightness of the previous frame and how many frames it has been
     /// unchanged: the game fades the world map by rewriting the palette.
     hud_luma: (u64,u32),
@@ -155,13 +161,34 @@ impl Engine {
         };
         Ok(())
     }
-    /// Screen rectangle of the in-game Menu button (map_menu::NATIVE in the
-    /// bottom HUD row, pinned to the frame bottom).
-    fn game_menu_button(&self)->Option<[f32;4]>{
-        let (_,bottom)=self.ui_dock?;
-        let [x0,y0,x1,y1]=crate::map_menu::NATIVE.map(|v|v as f32);
-        let s=self.world_rect[2]/mem::render_width() as f32;
-        Some([self.world_rect[0]+(mem::extra() as f32+x0)*s,bottom-(160.-y0)*s,(x1-x0)*s,(y1-y0)*s])
+    /// Touch-only portrait buttons of this scene, in the bottom HUD row:
+    /// world map Menu (Start; B closes an open menu, then it is highlighted),
+    /// Party screens Return (B), town scenes Return and, while the shop shows
+    /// its "R Info" hint (OAM tiles 0x2d4-0x2d9), Info (R).
+    /// A town scene (shop, pub, prison...) with the game-style button row.
+    pub(crate) fn town_buttons(&self)->bool{
+        let bus=&self.machine.bus;
+        self.touch_enabled && bus.ffta_dialogue.docked && !self.padded && crate::game_buttons::available(&bus.rom)
+            && gba_core::ppu::docked_town_scene(bus)
+    }
+    fn scene_buttons(&self)->Vec<crate::game_buttons::Button>{
+        use crate::game_buttons::row;
+        let bus=&self.machine.bus;
+        if !self.touch_enabled || !bus.ffta_dialogue.docked || self.padded || !crate::game_buttons::available(&bus.rom) {return Vec::new();}
+        let (start,back,info)=(0x3f7,0x3fd,0x2ff);
+        if bus.world_hud.map_frame {
+            let open=bus.world_hud.menu;
+            let w=crate::game_buttons::width(&bus.rom,"Menu");
+            return row(&bus.rom,110+w/2,&[("Menu",if open {back} else {start},open)]);
+        }
+        if self.menu_layout.is_some() {return row(&bus.rom,236,&[("Return",back,false)]);}
+        if self.town_buttons() {
+            let half=|o:&[u8],i:usize|u16::from_le_bytes([o[i],o[i+1]]);
+            let hint=bus.oam.chunks_exact(8).any(|o|half(o,0)&0x300!=0x200 && (0x2d4..=0x2d9).contains(&(half(o,4)&1023)) && (half(o,4)>>10)&3==0);
+            let items=[("Info",info,false),("Return",back,false)];
+            return row(&bus.rom,236,&items[if hint {0} else {1}..]);
+        }
+        Vec::new()
     }
     /// Moves the game's unit selection (EWRAM 0xfd3e) to a tapped unit with
     /// its own Left/Right, one press at a time: the cursor and the unit screen
@@ -186,22 +213,46 @@ impl Engine {
             self.party_goal=Some(goal);
             return;
         }
-        let index=bus.ewram.get(0xfd3e).copied().unwrap_or(0) as usize;
+        let index=bus.ewram.get(PARTY_INDEX).copied().unwrap_or(0) as usize;
         let cursor:[u8;4]=bus.ewram[0xfd30..0xfd34].try_into().unwrap_or([0;4]);
         goal.still=if cursor==goal.cursor {goal.still+1} else {0};
         goal.cursor=cursor;
         self.party_goal=Some(goal);
-        if goal.pressed.is_some_and(|(from,frame)|from==index && bus.frames<frame+30) {return;}
+        if goal.still<6 {return;}
         if index==goal.target {
             if goal.confirm && goal.still<10 {return;}
             if goal.confirm {battle::press(bus,0x3fe);}
             self.party_goal=None;
             return;
         }
-        if goal.still<6 {return;}
-        battle::press(bus,if goal.forward {0x3ef} else {0x3df});
+        if goal.pressed.is_some() {return;}
+        // The game's selection is a row and column (index = row * 4 + column,
+        // recomputed every frame on the roster). On the roster its cursor glides
+        // straight to the unit set there; unit screens only switch on Left/Right,
+        // so they start from the unit next to the target and make one switch.
+        let set=|bus:&mut gba_core::mem::MemMap,unit:usize|{bus.ewram[PARTY_COLUMN]=(unit%4) as u8;bus.ewram[PARTY_COLUMN+1]=(unit/4) as u8;};
+        if goal.confirm {
+            set(bus,goal.target);
+        } else {
+            let from=if goal.target>0 {goal.target-1} else {goal.target+1};
+            set(bus,from);
+            battle::press(bus,if from<goal.target {0x3ef} else {0x3df});
+        }
         goal.pressed=Some((index,bus.frames));
         self.party_goal=Some(goal);
+    }
+    /// A drag starting at screen point (x, y) (0..1) scrolls the party grid.
+    pub fn party_drag_starts(&self,x:f32,y:f32)->bool{
+        let Some(grid)=self.menu_layout.and_then(|l|l.grid) else {return false};
+        let ny=(y*self.ui_window.1 as f32-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32-mem::extra_y() as f32;
+        let (a,b)=grid.area();
+        grid.max_scroll()>0 && x.is_finite() && ny>=a as f32 && ny<b as f32
+    }
+    /// Scrolls the party grid by a drag of `dy` (fraction of the screen height).
+    pub fn party_drag(&mut self,dy:f32){
+        if !dy.is_finite() {return;}
+        let rows=dy*self.ui_window.1 as f32/self.world_rect[3]*mem::render_height() as f32;
+        self.party_scroll=(self.party_scroll as f32-rows).round().max(0.) as i32;
     }
     pub fn texture_rect(&self)->[f32;4]{
         let mut rect=self.world_rect;
@@ -231,7 +282,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,last_battery:None,resume_frame:0,menu_button:None,menu_button_in_game:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -384,9 +435,19 @@ impl Engine {
             self.world_map.present(&self.machine.bus,&mut self.pixels,dock);
             self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
         }
-        self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock,&mut self.party_cache)}else{None};
-        self.menu_button_in_game=self.touch_enabled && self.machine.bus.world_hud.map_frame && self.world_map.button;
-        self.menu_button=if self.menu_button_in_game {self.game_menu_button()} else {self.map_menu_button()};
+        self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock,&mut self.party_cache,&mut self.party_scroll)}else{None};
+        let buttons=self.scene_buttons();
+        let s=rect[3]/mem::render_height() as f32;
+        let offset=dock.1-160;
+        self.buttons=buttons.into_iter().map(|button|{
+            crate::game_buttons::draw(&self.machine.bus,&mut self.pixels,mem::render_width(),mem::render_height(),mem::extra(),offset,&button);
+            let (y0,y1)=crate::game_buttons::ROW;
+            let screen=[rect[0]+(mem::extra() as i32+button.x.0) as f32*s,rect[1]+(offset+y0) as f32*s,
+                (button.x.1-button.x.0) as f32*s,(y1-y0) as f32*s];
+            (button,screen)
+        }).collect();
+        // The app's own Menu button stands in only where the game's resources are missing.
+        self.menu_button=if self.buttons.is_empty() {self.map_menu_button()} else {None};
         let state=&self.machine.bus.ffta_dialogue;
         if state.town_layout {self.town_menu=crate::touch::town_menu(state).or(self.town_menu);}
         else if !state.shop_layout {self.town_menu=None;}

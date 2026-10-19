@@ -26,6 +26,8 @@ const CELL: [i32; 2] = [0, 2];
 const CELL_W: i32 = 32;
 const CELL_H: i32 = 47;
 const MAX_UNITS: usize = 24;
+/// Rows kept free below the unit screen for the button row.
+const BUTTON_ROW: i32 = crate::game_buttons::ROW_HEIGHT;
 
 /// Roster slot of unit `i` (cursor coordinates without scrolling): rows of
 /// four 48 apart, rows 40 apart, odd rows starting 24 further left.
@@ -102,30 +104,44 @@ impl PartyCache {
 }
 
 /// Upper-half party grid in native-relative rows (`top`..`bottom`): the bar
-/// on top, the units centred below it, three to a row (four beyond nine
-/// units), spaced out to fill the half.
+/// on top, below it the units three to a row in the roster's own zig-zag
+/// (every other row half a step to the right, so rows can sit closer than a
+/// cell is tall). Rows spread out to fill the half; a party taller than the
+/// half scrolls (`scroll` rows, up to `max_scroll`).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PartyGrid { pub top: i32, pub bottom: i32, pub count: usize }
+pub struct PartyGrid { pub top: i32, pub bottom: i32, pub count: usize, pub scroll: i32 }
+
+const COLUMNS: usize = 3;
+const PITCH_X: i32 = 72;
+const ZIG: i32 = PITCH_X / 2;
+/// Row pitch range: the roster's own 40 rows up to a roomy 64.
+const PITCH_Y: (i32, i32) = (40, 64);
 
 impl PartyGrid {
-    fn columns(&self) -> usize { if self.count <= 9 { 3 } else { 4 } }
-    fn rows(&self) -> usize { self.count.div_ceil(self.columns()).max(1) }
+    fn rows(&self) -> i32 { self.count.div_ceil(COLUMNS).max(1) as i32 }
+    /// Rows where units are shown (below the bar).
+    pub fn area(&self) -> (i32, i32) { (self.top + BAR_ROWS + 6, self.bottom) }
+    fn pitch_y(&self) -> i32 {
+        let (a, b) = self.area();
+        if self.rows() < 2 { return PITCH_Y.1; }
+        ((b - a - CELL_H) / (self.rows() - 1)).clamp(PITCH_Y.0, PITCH_Y.1)
+    }
+    fn content(&self) -> i32 { (self.rows() - 1) * self.pitch_y() + CELL_H }
+    pub fn max_scroll(&self) -> i32 { let (a, b) = self.area(); (self.content() - (b - a)).max(0) }
     /// Top-left of unit `i`'s cell.
     pub fn cell(&self, i: usize) -> [i32; 2] {
-        let (columns, rows) = (self.columns(), self.rows());
-        let (row, column) = (i / columns, i % columns);
-        let in_row = if row + 1 == rows { self.count - row * columns } else { columns };
-        let pitch_x = if columns == 3 { 72 } else { 56 };
-        let width = (in_row as i32 - 1) * pitch_x + CELL_W;
-        let area = (self.top + BAR_ROWS + 8, self.bottom);
-        let pitch_y = ((area.1 - area.0) / rows as i32).clamp(CELL_H + 4, 72);
-        let block = (rows as i32 - 1) * pitch_y + CELL_H;
-        [(240 - width) / 2 + column as i32 * pitch_x, area.0 + (area.1 - area.0 - block).max(0) / 2 + row as i32 * pitch_y]
+        let (row, column) = ((i / COLUMNS) as i32, (i % COLUMNS) as i32);
+        let width = (COLUMNS as i32 - 1) * PITCH_X + CELL_W + ZIG;
+        let (a, b) = self.area();
+        let first = a + (b - a - self.content()).max(0) / 2 - self.scroll.clamp(0, self.max_scroll());
+        [(240 - width) / 2 + column * PITCH_X + (row % 2) * ZIG, first + row * self.pitch_y()]
     }
     pub fn unit_at(&self, x: f32, y: f32) -> Option<usize> {
+        let (a, b) = self.area();
+        if y < a as f32 || y >= b as f32 { return None; }
         (0..self.count).find(|&i| {
             let [cx, cy] = self.cell(i).map(|v| v as f32);
-            x >= cx - 6. && x < cx + CELL_W as f32 + 6. && y >= cy && y < cy + CELL_H as f32
+            x >= cx - 4. && x < cx + CELL_W as f32 + 4. && y >= cy && y < cy + CELL_H as f32
         })
     }
 }
@@ -163,14 +179,15 @@ impl MenuLayout {
 fn half(data: &[u8], offset: usize) -> i32 { u16::from_le_bytes([data[offset], data[offset + 1]]) as i32 }
 
 /// Draws the Party screen into `pixels` (the background pattern everywhere).
-pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut Option<PartyCache>) -> Option<MenuLayout> {
+pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut Option<PartyCache>, scroll: &mut i32) -> Option<MenuLayout> {
     let screen = &bus.menu_screen;
     if !screen.frame || screen.groups.len() < 3 * 240 * 160 { *cache = None; return None; }
     let (rw, rh) = (mem::render_width(), mem::render_height() as i32);
     let (ex, ey) = (mem::extra() as i32, mem::extra_y() as i32);
     let (top, bottom) = (dock.0 - ey, dock.1 - ey);
     if bottom - top < 2 * 160 { return None; }
-    let lower_shift = ((bottom - 160) as f64 / PERIOD as f64).floor() as i32 * PERIOD;
+    // The bottom HUD row (game_buttons::ROW) stays free for the Return button.
+    let lower_shift = ((bottom - 160 - BUTTON_ROW) as f64 / PERIOD as f64).floor() as i32 * PERIOD;
     let colors = crate::engine::rgba_colors();
     let group = |g: usize| &screen.groups[g * 240 * 160..(g + 1) * 240 * 160];
     let template = screen.template;
@@ -180,7 +197,10 @@ pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut O
     let roster_live = template == Template::Roster
         && group(0)[..(BAR_ROWS * 240) as usize].chunks_exact(240).filter(|row| row.iter().filter(|&&p| p != TRANSPARENT).count() >= 180).count() >= 6;
     let index = bus.ewram.get(INDEX).copied().unwrap_or(0) as usize;
-    if roster_live && screen.label_pixels >= 40 {
+    // Captured only while the cursor rests (its position at 0xfd30 equals its
+    // target at 0xfd38): the roster's scroll is read from it.
+    let resting = bus.ewram.get(CURSOR..CURSOR + 4) == bus.ewram.get(CURSOR + 8..CURSOR + 12);
+    if roster_live && resting && screen.label_pixels >= 40 {
         let scroll = half(&bus.ewram, CURSOR + 2) - slot(index)[1];
         cache.get_or_insert_with(|| PartyCache { bar: Vec::new(), cells: vec![None; MAX_UNITS], ellipse: Vec::new(), ellipse_cell: [0, 0] })
             .update(group(0), group(2), index, scroll);
@@ -189,10 +209,12 @@ pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut O
     let (eva, evb) = ((io(0x52) & 31).min(16), ((io(0x52) >> 8) & 31).min(16));
     // Copies `width`-wide `source` pixels to native point (x, y); blended ones
     // are semi-transparent sprite colours over the pattern (BLDALPHA).
-    let mut blit = |source: &[u16], width: i32, x: i32, y: i32, blend: bool| {
+    // `rows` clips the native rows written (the scrolling party area).
+    let mut blit = |source: &[u16], width: i32, x: i32, y: i32, blend: bool, rows: (i32, i32)| {
         for (i, &p) in source.iter().enumerate() {
             if p == TRANSPARENT { continue; }
             let (tx, ty) = (ex + x + i as i32 % width, ey + y + i as i32 / width);
+            if !(rows.0 + ey..rows.1 + ey).contains(&ty) { continue; }
             if !(0..rw as i32).contains(&tx) || !(0..rh).contains(&ty) { continue; }
             let out = &mut pixels[ty as usize * rw + tx as usize];
             *out = if blend {
@@ -205,17 +227,21 @@ pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut O
         }
     };
     // Upper half: the party grid, the selection under the unit selected now.
+    let all = (i32::MIN / 2, i32::MAX / 2);
     let grid = cache.as_ref().filter(|c| c.count() > 0).map(|kept| {
-        let grid = PartyGrid { top: top + 8, bottom: (top + bottom) / 2, count: kept.count() };
-        blit(&kept.bar, 240, 0, grid.top, false);
+        let mut grid = PartyGrid { top: top + 8, bottom: (top + bottom) / 2, count: kept.count(), scroll: 0 };
+        *scroll = (*scroll).clamp(0, grid.max_scroll());
+        grid.scroll = *scroll;
+        let area = grid.area();
+        blit(&kept.bar, 240, 0, grid.top, false, all);
         if index < grid.count {
             let [cx, cy] = grid.cell(index);
-            blit(&kept.ellipse, 240, cx - kept.ellipse_cell[0], cy - kept.ellipse_cell[1], true);
+            blit(&kept.ellipse, 240, cx - kept.ellipse_cell[0], cy - kept.ellipse_cell[1], true, area);
         }
         for i in 0..grid.count {
             if let Some(cell) = &kept.cells[i] {
                 let [cx, cy] = grid.cell(i);
-                blit(cell, CELL_W, cx, cy, false);
+                blit(cell, CELL_W, cx, cy, false, area);
             }
         }
         grid
@@ -229,7 +255,7 @@ pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut O
         if let Some(first) = rows.clone().find(|&y| picture[(y * 240) as usize..((y + 1) * 240) as usize].iter().any(|&p| p != TRANSPARENT)) {
             lower_start = lower_start.min(first);
         }
-        blit(&picture[(rows.start * 240) as usize..(rows.end * 240) as usize], 240, 0, lower_shift + rows.start, false);
+        blit(&picture[(rows.start * 240) as usize..(rows.end * 240) as usize], 240, 0, lower_shift + rows.start, false, all);
     }
     Some(MenuLayout { template, roster_live, grid, lower_shift, lower_start })
 }
@@ -243,24 +269,30 @@ mod tests {
         assert_eq!([slot(0), slot(1), slot(2), slot(5)], [[48, 8], [96, 8], [144, 8], [72, 48]]);
     }
     #[test]
-    fn the_party_fills_the_upper_half_in_rows_of_three() {
-        let grid = PartyGrid { top: -140, bottom: 90, count: 6 };
+    fn the_party_zig_zags_three_to_a_row_and_scrolls_when_taller_than_the_half() {
+        let grid = PartyGrid { top: -140, bottom: 90, count: 6, scroll: 0 };
         let cells: Vec<_> = (0..6).map(|i| grid.cell(i)).collect();
-        // Two centred rows of three, inside the half, below the bar.
+        // Rows of three, the second half a step right; centred, below the bar.
         assert_eq!(cells[0][1], cells[2][1]);
-        assert_eq!(cells[0][0] + cells[2][0] + CELL_W, 240);
-        assert!(cells[0][1] >= grid.top + BAR_ROWS && cells[5][1] + CELL_H <= grid.bottom);
-        assert!(cells[3][1] - cells[0][1] >= CELL_H + 4);
+        assert_eq!(cells[3][0] - cells[0][0], ZIG);
+        assert_eq!(cells[0][0] + cells[5][0] + CELL_W, 240);
+        assert!(cells[0][1] >= grid.area().0 && cells[5][1] + CELL_H <= grid.bottom);
+        assert_eq!(grid.max_scroll(), 0);
         assert_eq!(grid.unit_at((cells[4][0] + 16) as f32, (cells[4][1] + 20) as f32), Some(4));
         assert_eq!(grid.unit_at(1., (cells[4][1] + 20) as f32), None);
-        // A seventh unit is centred alone on a third row; ten use rows of four.
-        let seven = PartyGrid { count: 7, ..grid };
-        assert_eq!(seven.cell(6)[0], (240 - CELL_W) / 2);
-        assert_eq!(PartyGrid { count: 10, ..grid }.cell(3)[1], PartyGrid { count: 10, ..grid }.cell(0)[1]);
+        // Twenty units do not fit: they scroll, and a scrolled unit is tapped where it is drawn.
+        let full = PartyGrid { count: 20, ..grid };
+        assert!(full.max_scroll() > 0 && full.pitch_y() == PITCH_Y.0);
+        let scrolled = PartyGrid { scroll: 40, ..full };
+        assert_eq!(scrolled.cell(9)[1], full.cell(9)[1] - 40);
+        let [x, y] = scrolled.cell(9);
+        assert_eq!(scrolled.unit_at((x + 16) as f32, (y + 20) as f32), Some(9));
+        // Scrolling never runs past the last row.
+        assert_eq!(PartyGrid { scroll: 10_000, ..full }.cell(19), PartyGrid { scroll: full.max_scroll(), ..full }.cell(19));
     }
     #[test]
     fn taps_land_on_the_bar_units_and_the_lower_block() {
-        let grid = PartyGrid { top: -140, bottom: 90, count: 6 };
+        let grid = PartyGrid { top: -140, bottom: 90, count: 6, scroll: 0 };
         let layout = MenuLayout { template: Template::Unit, roster_live: false, grid: Some(grid), lower_shift: 160, lower_start: 0 };
         assert!(matches!(layout.hit(120., -136.), Hit::Bar(0x3f7)));
         let [cx, cy] = grid.cell(2);
