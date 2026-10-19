@@ -1,5 +1,5 @@
 use crate::compiler::{self, NativeCode};
-use gba_core::{Machine, cpu::FLAG_I, mem};
+use gba_core::{Machine, cpu::FLAG_I, ffta_battle_mouse as battle, mem};
 use sha1::{Digest, Sha1};
 use std::{collections::BTreeSet, path::PathBuf, sync::{Mutex, atomic::{AtomicU32, Ordering}}, time::Instant};
 pub static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -7,6 +7,34 @@ pub static STATUS: Mutex<String> = Mutex::new(String::new());
 pub static KEYS: AtomicU32 = AtomicU32::new(0x3ff);
 pub const MAX_STEPS: u64 = 5_000_000;
 pub fn status(message: impl Into<String>) { *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = message.into(); }
+#[derive(Clone,Copy)]
+pub(crate) struct PartyGoal {
+    pub target:usize,
+    /// Right (true) or Left: unit screens cycle, so the shorter way round.
+    pub forward:bool,
+    pub confirm:bool,
+    pub deadline:u64,
+    /// Index and frame of the last press.
+    pub pressed:Option<(usize,u64)>,
+    /// Roster cursor position (EWRAM 0xfd30) and for how many frames it has
+    /// not moved: the cursor glides to a unit and A is only taken once it rests.
+    pub cursor:[u8;4],
+    pub still:u32,
+    /// Party menus: the native row the menu cursor (`party_cursor`) must
+    /// reach instead of a unit (it moves with Up/Down; A once it rests).
+    pub row:Option<i32>,
+}
+
+/// The game's menu cursor on Party screens (OAM tiles 0x120-0x127, priority 0;
+/// with two lists shown the later one is the active list's).
+pub(crate) fn party_cursor(bus:&gba_core::mem::MemMap)->Option<(i32,i32)>{
+    let half=|o:&[u8],i:usize|u16::from_le_bytes([o[i],o[i+1]]);
+    bus.oam.chunks_exact(8).filter(|o|{
+        let (a0,a2)=(half(o,0),half(o,4));
+        a0&0x300!=0x200 && (0x120..=0x127).contains(&(a2&1023)) && (a2>>10)&3==0 && (a0&255)<160
+    }).map(|o|((half(o,2)&511) as i32,(half(o,0)&255) as i32)).last()
+}
+
 pub struct Engine {
     pub mouse: gba_core::ffta_mouse::LanguageMouse,
     pub touch_enabled: bool,
@@ -24,6 +52,10 @@ pub struct Engine {
     world_map: crate::world_map::WorldMap,
     /// Portrait Party screen placement of the current frame (menu_layout.rs).
     pub menu_layout: Option<crate::menu_layout::MenuLayout>,
+    /// The roster kept for the unit screens (menu_layout.rs).
+    pub(crate) party_cache: Option<crate::menu_layout::PartyCache>,
+    /// A unit selected by tap, reached one press at a time (`drive_party_goal`).
+    pub(crate) party_goal: Option<PartyGoal>,
     /// Screen rectangle of the world map Menu button (touch-only portrait), see `map_menu_button`.
     pub menu_button: Option<[f32;4]>,
     /// The Menu button is drawn in the game picture (map_menu.rs); otherwise
@@ -100,6 +132,46 @@ impl Engine {
         let s=self.world_rect[2]/mem::render_width() as f32;
         Some([self.world_rect[0]+(mem::extra() as f32+x0)*s,bottom-(160.-y0)*s,(x1-x0)*s,(y1-y0)*s])
     }
+    /// Moves the game's unit selection (EWRAM 0xfd3e) to a tapped unit with
+    /// its own Left/Right, one press at a time: the cursor and the unit screen
+    /// animate and ignore input meanwhile, so the next press waits until the
+    /// index has changed (or 30 frames passed) and the cursor has rested for 6
+    /// frames. Then A, if asked, once it has rested for 10.
+    fn drive_party_goal(&mut self){
+        let Some(mut goal)=self.party_goal else {return};
+        let bus=&mut self.machine.bus;
+        if bus.frames>goal.deadline || !bus.menu_screen.frame {self.party_goal=None;return;}
+        if !battle::idle(bus) {return;}
+        if let Some(row)=goal.row {
+            // Menu rows: Up/Down until the cursor rests on the row, then A.
+            let Some((_,y))=party_cursor(bus) else {self.party_goal=None;return};
+            goal.still=if goal.cursor[0]==y as u8 {goal.still+1} else {0};
+            goal.cursor[0]=y as u8;
+            self.party_goal=Some(goal);
+            if goal.still<4 {return;}
+            if y==row {battle::press(bus,0x3fe);self.party_goal=None;return;}
+            battle::press(bus,if row>y {0x37f} else {0x3bf});
+            goal.still=0;
+            self.party_goal=Some(goal);
+            return;
+        }
+        let index=bus.ewram.get(0xfd3e).copied().unwrap_or(0) as usize;
+        let cursor:[u8;4]=bus.ewram[0xfd30..0xfd34].try_into().unwrap_or([0;4]);
+        goal.still=if cursor==goal.cursor {goal.still+1} else {0};
+        goal.cursor=cursor;
+        self.party_goal=Some(goal);
+        if goal.pressed.is_some_and(|(from,frame)|from==index && bus.frames<frame+30) {return;}
+        if index==goal.target {
+            if goal.confirm && goal.still<10 {return;}
+            if goal.confirm {battle::press(bus,0x3fe);}
+            self.party_goal=None;
+            return;
+        }
+        if goal.still<6 {return;}
+        battle::press(bus,if goal.forward {0x3ef} else {0x3df});
+        goal.pressed=Some((index,bus.frames));
+        self.party_goal=Some(goal);
+    }
     pub fn texture_rect(&self)->[f32;4]{
         let mut rect=self.world_rect;
         rect[1]+=self.view_shift as f32*rect[3]/mem::render_height() as f32;
@@ -128,7 +200,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,menu_button:None,menu_button_in_game:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,menu_button:None,menu_button_in_game:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -209,6 +281,7 @@ impl Engine {
             self.cache_dir.as_deref().unwrap_or(&std::env::temp_dir()))?;
         let count=count.clamp(1,8);
         for index in 0..count {
+            self.drive_party_goal();
             let m = &mut *self.machine;
             m.bus.skip_render=self.skip_hidden_frames && index+1<count;
             let keys=self.mouse.keys(&mut m.bus,(KEYS.load(Ordering::Relaxed) as u16)&0x3ff);
@@ -280,7 +353,7 @@ impl Engine {
             self.world_map.present(&self.machine.bus,&mut self.pixels,dock);
             self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
         }
-        self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock)}else{None};
+        self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock,&mut self.party_cache)}else{None};
         self.menu_button_in_game=self.touch_enabled && self.machine.bus.world_hud.map_frame && self.world_map.button;
         self.menu_button=if self.menu_button_in_game {self.game_menu_button()} else {self.map_menu_button()};
         let state=&self.machine.bus.ffta_dialogue;

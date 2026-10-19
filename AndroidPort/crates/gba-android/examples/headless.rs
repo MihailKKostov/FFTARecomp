@@ -152,6 +152,16 @@ fn compose(engine: &Engine, view: &View, screen: (u32, u32)) -> Vec<u8> {
             state.extra.kind, state.action_layout, state.town_layout, state.shop_layout, state.site_layout, engine.expanded, engine.padded);
         let io = &engine.machine.bus.io;
         eprintln!("  regs {:04x} {:04x?}", u16::from_le_bytes([io[0], io[1]]), [8, 10, 12, 14].map(|o| u16::from_le_bytes([io[o], io[o + 1]])));
+        if let Some(layout) = engine.menu_layout {
+            let s = engine.world_rect[2] / gba_core::mem::render_width() as f32;
+            let to_screen = |x: i32, y: i32| (((gba_core::mem::extra() as i32 + x) as f32 * s + engine.world_rect[0]) / screen.0 as f32,
+                ((gba_core::mem::extra_y() as i32 + y) as f32 * s + engine.world_rect[1]) / screen.1 as f32);
+            if let Some(grid) = layout.grid {
+                let units: Vec<_> = (0..grid.count).map(|i| { let [x, y] = grid.cell(i); to_screen(x + 16, y + 20) }).collect();
+                eprintln!("  party units {units:.3?}");
+            }
+            eprintln!("  party lower_shift {} lower_start {} -> screen y {:.3}", layout.lower_shift, layout.lower_start, to_screen(0, layout.lower_shift).1);
+        }
         eprintln!("  blocks {:?}", gba_android::touch::canvas_blocks(&state.pixels).iter().map(|b| b.0).collect::<Vec<_>>());
     }
     for slot in 0..8 {

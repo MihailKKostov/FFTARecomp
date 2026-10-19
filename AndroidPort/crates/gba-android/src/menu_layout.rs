@@ -1,80 +1,245 @@
-//! Portrait Party screens (see gba-core menu_screen.rs): the tall view shows the
-//! background pattern; the upper group is moved up under the docking frame's
-//! top, the lower group down to its bottom (menus and lists in thumb reach).
-use gba_core::{mem::{self, MemMap}, menu_screen::{PERIOD, TRANSPARENT}};
+//! Portrait Party screens (see gba-core menu_screen.rs) as one layout:
+//! the upper half always shows the whole party, the lower half the selected
+//! unit (the roster's unit panel, or the unit's status/Equip/Abilities/Jobs
+//! screen in one piece, menus in thumb reach).
+//!
+//! The game draws the roster only on the roster screen. Each unit's cell (its
+//! sprite and "No." label) and the roster's hint bar are kept from the settled
+//! roster and laid out as a grid filling the upper half, on the roster and on
+//! the unit screens alike; the game's own selection ellipse (captured on its
+//! own, raw sprite colours) is blended under the unit selected now. Taps use
+//! the game's own controls: on the roster its cursor and A (and the bar's L,
+//! Start and R), on unit screens its Left/Right unit cycling.
+use gba_core::{mem::{self, MemMap}, menu_screen::{Template, PERIOD, TRANSPARENT}};
+
+/// Measured USA roster state (EWRAM): cursor position (x, y halfwords) and
+/// the selected unit's index, which unit screens also show.
+const CURSOR: usize = 0xfd30;
+const INDEX: usize = 0xfd3e;
+/// Native rows of the roster's bar and unit grid; its unit panel is below.
+const ROSTER_ROWS: i32 = 100;
+/// The hint bar ("L CHANGE", "START: Item List", "R SORT") on rows 0-7.
+const BAR_ROWS: i32 = 8;
+/// A unit's cell relative to its roster slot: the sprite (rows 4-40) and its
+/// "No." label (rows 41-48), 32 columns wide.
+const CELL: [i32; 2] = [0, 2];
+const CELL_W: i32 = 32;
+const CELL_H: i32 = 47;
+const MAX_UNITS: usize = 24;
+
+/// Roster slot of unit `i` (cursor coordinates without scrolling): rows of
+/// four 48 apart, rows 40 apart, odd rows starting 24 further left.
+pub fn slot(i: usize) -> [i32; 2] {
+    let (row, column) = ((i / 4) as i32, (i % 4) as i32);
+    [if row % 2 == 0 { 48 } else { 24 } + 48 * column, 8 + 40 * row]
+}
+
+pub struct PartyCache {
+    bar: Vec<u16>,
+    cells: Vec<Option<Vec<u16>>>,
+    ellipse: Vec<u16>,
+    /// Native position of the cell the ellipse was under when captured.
+    ellipse_cell: [i32; 2],
+}
+
+impl PartyCache {
+    pub fn count(&self) -> usize { self.cells.iter().rposition(Option::is_some).map_or(0, |i| i + 1) }
+    pub fn has_unit(&self, i: usize) -> bool { self.cells.get(i).is_some_and(Option::is_some) }
+
+    /// Takes the bar, the visible units' cells and the ellipse from a settled
+    /// roster frame; units scrolled out of view keep their earlier cells.
+    fn update(&mut self, upper: &[u16], ellipse: &[u16], index: usize, scroll: i32) {
+        self.bar = upper[..(BAR_ROWS * 240) as usize].to_vec();
+        for i in 0..MAX_UNITS {
+            let [sx, sy] = slot(i);
+            let (x0, y0) = (sx + CELL[0], sy + CELL[1] + scroll);
+            if y0 < BAR_ROWS || y0 + CELL_H > ROSTER_ROWS { continue; }
+            // Roster rows overlap: the row above's labels reach into a cell's
+            // top. Pixels inside another unit's label box are not this unit's.
+            let label = |j: usize, x: i32, y: i32| {
+                let [lx, ly] = slot(j);
+                x >= lx && x < lx + CELL_W && y >= ly + 41 + scroll && y < ly + 49 + scroll
+            };
+            let cell: Vec<u16> = (0..CELL_H).flat_map(|y| (0..CELL_W).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    let (px, py) = (x0 + x, y0 + y);
+                    if (0..MAX_UNITS).any(|j| j != i && label(j, px, py)) { TRANSPARENT } else { upper[(py * 240 + px) as usize] }
+                }).collect();
+            // A unit is there when its sprite rows hold pixels.
+            let sprite = cell[(2 * CELL_W) as usize..(38 * CELL_W) as usize].iter().filter(|&&p| p != TRANSPARENT).count();
+            self.cells[i] = (sprite >= 24).then_some(cell);
+        }
+        self.ellipse = ellipse.to_vec();
+        let [sx, sy] = slot(index);
+        self.ellipse_cell = [sx + CELL[0], sy + CELL[1] + scroll];
+    }
+}
+
+/// Upper-half party grid in native-relative rows (`top`..`bottom`): the bar
+/// on top, the units centred below it, three to a row (four beyond nine
+/// units), spaced out to fill the half.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartyGrid { pub top: i32, pub bottom: i32, pub count: usize }
+
+impl PartyGrid {
+    fn columns(&self) -> usize { if self.count <= 9 { 3 } else { 4 } }
+    fn rows(&self) -> usize { self.count.div_ceil(self.columns()).max(1) }
+    /// Top-left of unit `i`'s cell.
+    pub fn cell(&self, i: usize) -> [i32; 2] {
+        let (columns, rows) = (self.columns(), self.rows());
+        let (row, column) = (i / columns, i % columns);
+        let in_row = if row + 1 == rows { self.count - row * columns } else { columns };
+        let pitch_x = if columns == 3 { 72 } else { 56 };
+        let width = (in_row as i32 - 1) * pitch_x + CELL_W;
+        let area = (self.top + BAR_ROWS + 8, self.bottom);
+        let pitch_y = ((area.1 - area.0) / rows as i32).clamp(CELL_H + 4, 72);
+        let block = (rows as i32 - 1) * pitch_y + CELL_H;
+        [(240 - width) / 2 + column as i32 * pitch_x, area.0 + (area.1 - area.0 - block).max(0) / 2 + row as i32 * pitch_y]
+    }
+    pub fn unit_at(&self, x: f32, y: f32) -> Option<usize> {
+        (0..self.count).find(|&i| {
+            let [cx, cy] = self.cell(i).map(|v| v as f32);
+            x >= cx - 6. && x < cx + CELL_W as f32 + 6. && y >= cy && y < cy + CELL_H as f32
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MenuLayout {
-    /// Texture rows each group moved by (upper, lower), multiples of PERIOD.
-    pub shift: [i32; 2],
-    /// Native rows holding each group's pixels: upper ends at `upper_end`,
-    /// lower starts at `lower_start`.
-    pub upper_end: i32,
+    pub template: Template,
+    /// The roster is on screen and settled: taps move its cursor.
+    pub roster_live: bool,
+    /// The party grid shown in the upper half, if any.
+    pub grid: Option<PartyGrid>,
+    /// Texture rows the lower block moved by, and its first native row.
+    pub lower_shift: i32,
     pub lower_start: i32,
 }
+
+pub enum Hit { Unit(usize), Bar(u16), Lower(f32), None }
+
 impl MenuLayout {
-    /// Native row shown at native-relative texture row `y`, None in the gap.
-    pub fn native_row(&self, y: f32) -> Option<f32> {
-        if y >= (self.lower_start + self.shift[1]) as f32 { Some(y - self.shift[1] as f32) }
-        else if y < (self.upper_end + self.shift[0]) as f32 { Some(y - self.shift[0] as f32) }
-        else { None }
+    /// What a tap at native-relative texture point (x, y) lands on.
+    pub fn hit(&self, x: f32, y: f32) -> Hit {
+        if let Some(grid) = self.grid {
+            if y >= grid.top as f32 && y < (grid.top + BAR_ROWS) as f32 {
+                // The bar's L, Start and R thirds, as printed on it.
+                return Hit::Bar(if x < 80. { 0x1ff } else if x < 160. { 0x3f7 } else { 0x2ff });
+            }
+            if let Some(i) = grid.unit_at(x, y) { return Hit::Unit(i); }
+        }
+        let lower = self.lower_shift as f32;
+        if y >= lower + self.lower_start as f32 && y < lower + 160. { return Hit::Lower(y - lower); }
+        Hit::None
     }
 }
 
-/// Shifts placing native rows 0..160 between texture rows `dock` (relative to
-/// the native screen's first texture row), by whole pattern periods.
-pub fn shifts(dock: (i32, i32)) -> [i32; 2] {
-    let up = (dock.0 as f64 / PERIOD as f64).ceil() as i32 * PERIOD;
-    let down = ((dock.1 - 160) as f64 / PERIOD as f64).floor() as i32 * PERIOD;
-    if up > 0 || down < 0 || up > down { [0, 0] } else { [up, down] }
-}
+fn half(data: &[u8], offset: usize) -> i32 { u16::from_le_bytes([data[offset], data[offset + 1]]) as i32 }
 
-/// Draws both groups into `pixels` (render_width x render_height, the pattern
-/// everywhere). `dock` is the (top, bottom) texture rows of the docking frame.
-pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32)) -> Option<MenuLayout> {
+/// Draws the Party screen into `pixels` (the background pattern everywhere).
+pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut Option<PartyCache>) -> Option<MenuLayout> {
     let screen = &bus.menu_screen;
-    if !screen.frame || screen.groups.len() < 2 * 240 * 160 { return None; }
+    if !screen.frame || screen.groups.len() < 3 * 240 * 160 { *cache = None; return None; }
     let (rw, rh) = (mem::render_width(), mem::render_height() as i32);
-    let (ex, ey) = (mem::extra(), mem::extra_y() as i32);
-    let shift = shifts((dock.0 - ey, dock.1 - ey));
+    let (ex, ey) = (mem::extra() as i32, mem::extra_y() as i32);
+    let (top, bottom) = (dock.0 - ey, dock.1 - ey);
+    if bottom - top < 2 * 160 { return None; }
+    let lower_shift = ((bottom - 160) as f64 / PERIOD as f64).floor() as i32 * PERIOD;
     let colors = crate::engine::rgba_colors();
-    let mut rows = [(i32::MAX, i32::MIN); 2];
-    for group in 0..2 {
-        for y in 0..160 {
-            let source = &screen.groups[(group * 160 + y) * 240..][..240];
-            if source.iter().all(|&p| p == TRANSPARENT) { continue; }
-            rows[group] = (rows[group].0.min(y as i32), rows[group].1.max(y as i32 + 1));
-            let target = ey + y as i32 + shift[group];
-            if !(0..rh).contains(&target) { continue; }
-            let row = &mut pixels[target as usize * rw + ex..][..240];
-            for (out, &p) in row.iter_mut().zip(source) {
-                if p != TRANSPARENT { *out = colors[(p & 0x7fff) as usize]; }
+    let group = |g: usize| &screen.groups[g * 240 * 160..(g + 1) * 240 * 160];
+    let template = screen.template;
+    // The roster has settled when its bar is drawn (at least six of rows 0-7
+    // nearly full width) and its "No." labels, which the game erases first
+    // when it leaves the roster (BG text between the bar and the panel).
+    let roster_live = template == Template::Roster
+        && group(0)[..(BAR_ROWS * 240) as usize].chunks_exact(240).filter(|row| row.iter().filter(|&&p| p != TRANSPARENT).count() >= 180).count() >= 6;
+    let index = bus.ewram.get(INDEX).copied().unwrap_or(0) as usize;
+    if roster_live && screen.label_pixels >= 40 {
+        let scroll = half(&bus.ewram, CURSOR + 2) - slot(index)[1];
+        cache.get_or_insert_with(|| PartyCache { bar: Vec::new(), cells: vec![None; MAX_UNITS], ellipse: Vec::new(), ellipse_cell: [0, 0] })
+            .update(group(0), group(2), index, scroll);
+    }
+    let io = |o: usize| u16::from_le_bytes([bus.io[o], bus.io[o + 1]]) as u32;
+    let (eva, evb) = ((io(0x52) & 31).min(16), ((io(0x52) >> 8) & 31).min(16));
+    // Copies `width`-wide `source` pixels to native point (x, y); blended ones
+    // are semi-transparent sprite colours over the pattern (BLDALPHA).
+    let mut blit = |source: &[u16], width: i32, x: i32, y: i32, blend: bool| {
+        for (i, &p) in source.iter().enumerate() {
+            if p == TRANSPARENT { continue; }
+            let (tx, ty) = (ex + x + i as i32 % width, ey + y + i as i32 / width);
+            if !(0..rw as i32).contains(&tx) || !(0..rh).contains(&ty) { continue; }
+            let out = &mut pixels[ty as usize * rw + tx as usize];
+            *out = if blend {
+                let under = *out as u32;
+                let world = ((under >> 19) & 31) | ((under >> 11) & 31) << 5 | ((under >> 3) & 31) << 10;
+                colors[[0, 5, 10].iter().fold(0u32, |acc, &s| {
+                    acc | ((((p as u32 >> s) & 31) * eva + ((world >> s) & 31) * evb) / 16).min(31) << s
+                }) as usize]
+            } else { colors[(p & 0x7fff) as usize] };
+        }
+    };
+    // Upper half: the party grid, the selection under the unit selected now.
+    let grid = cache.as_ref().filter(|c| c.count() > 0).map(|kept| {
+        let grid = PartyGrid { top: top + 8, bottom: (top + bottom) / 2, count: kept.count() };
+        blit(&kept.bar, 240, 0, grid.top, false);
+        if index < grid.count {
+            let [cx, cy] = grid.cell(index);
+            blit(&kept.ellipse, 240, cx - kept.ellipse_cell[0], cy - kept.ellipse_cell[1], true);
+        }
+        for i in 0..grid.count {
+            if let Some(cell) = &kept.cells[i] {
+                let [cx, cy] = grid.cell(i);
+                blit(cell, CELL_W, cx, cy, false);
             }
         }
+        grid
+    });
+    // Lower half: the roster's unit panel, or the unit screen in one piece.
+    let rows = if template == Template::Roster { ROSTER_ROWS..160 } else { 0..160 };
+    let groups: &[usize] = if template == Template::Roster { &[1] } else { &[0, 1] };
+    let mut lower_start = 160;
+    for &g in groups {
+        let picture = group(g);
+        if let Some(first) = rows.clone().find(|&y| picture[(y * 240) as usize..((y + 1) * 240) as usize].iter().any(|&p| p != TRANSPARENT)) {
+            lower_start = lower_start.min(first);
+        }
+        blit(&picture[(rows.start * 240) as usize..(rows.end * 240) as usize], 240, 0, lower_shift + rows.start, false);
     }
-    let cut = screen.template.cut();
-    Some(MenuLayout {
-        shift,
-        upper_end: if rows[0].1 > i32::MIN { rows[0].1 } else { cut },
-        lower_start: if rows[1].0 < i32::MAX { rows[1].0 } else { cut },
-    })
+    Some(MenuLayout { template, roster_live, grid, lower_shift, lower_start })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn groups_move_to_the_frame_edges_by_whole_pattern_periods() {
-        // Frame from 150 rows above the native screen to 160 + 170 below its top.
-        let s = shifts((-150, 330));
-        assert_eq!(s, [-144, 160]);
-        assert!(s.iter().all(|v| v % PERIOD == 0));
-        // A frame no taller than the screen keeps the native layout.
-        assert_eq!(shifts((0, 160)), [0, 0]);
-        assert_eq!(shifts((10, 150)), [0, 0]);
-        let layout = MenuLayout { shift: s, upper_end: 61, lower_start: 50 };
-        assert_eq!(layout.native_row(-144. + 10.), Some(10.));
-        assert_eq!(layout.native_row(160. + 70.), Some(70.));
-        assert_eq!(layout.native_row(100.), None);
+    fn roster_slots_follow_the_measured_cursor_positions() {
+        // Measured cursor: units 0, 1, 2 at (48|96|144, 8); unit 5 at (72, 48).
+        assert_eq!([slot(0), slot(1), slot(2), slot(5)], [[48, 8], [96, 8], [144, 8], [72, 48]]);
+    }
+    #[test]
+    fn the_party_fills_the_upper_half_in_rows_of_three() {
+        let grid = PartyGrid { top: -140, bottom: 90, count: 6 };
+        let cells: Vec<_> = (0..6).map(|i| grid.cell(i)).collect();
+        // Two centred rows of three, inside the half, below the bar.
+        assert_eq!(cells[0][1], cells[2][1]);
+        assert_eq!(cells[0][0] + cells[2][0] + CELL_W, 240);
+        assert!(cells[0][1] >= grid.top + BAR_ROWS && cells[5][1] + CELL_H <= grid.bottom);
+        assert!(cells[3][1] - cells[0][1] >= CELL_H + 4);
+        assert_eq!(grid.unit_at((cells[4][0] + 16) as f32, (cells[4][1] + 20) as f32), Some(4));
+        assert_eq!(grid.unit_at(1., (cells[4][1] + 20) as f32), None);
+        // A seventh unit is centred alone on a third row; ten use rows of four.
+        let seven = PartyGrid { count: 7, ..grid };
+        assert_eq!(seven.cell(6)[0], (240 - CELL_W) / 2);
+        assert_eq!(PartyGrid { count: 10, ..grid }.cell(3)[1], PartyGrid { count: 10, ..grid }.cell(0)[1]);
+    }
+    #[test]
+    fn taps_land_on_the_bar_units_and_the_lower_block() {
+        let grid = PartyGrid { top: -140, bottom: 90, count: 6 };
+        let layout = MenuLayout { template: Template::Unit, roster_live: false, grid: Some(grid), lower_shift: 160, lower_start: 0 };
+        assert!(matches!(layout.hit(120., -136.), Hit::Bar(0x3f7)));
+        let [cx, cy] = grid.cell(2);
+        assert!(matches!(layout.hit((cx + 10) as f32, (cy + 10) as f32), Hit::Unit(2)));
+        assert!(matches!(layout.hit(100., 230.), Hit::Lower(y) if y == 70.));
+        assert!(matches!(layout.hit(100., 120.), Hit::None));
     }
 }

@@ -589,9 +589,15 @@ fn capture_menu_groups(mem:&mut MemMap,dispcnt:u16,line:usize,bg_lines:&[Line;4]
         compose_into_range(mem,dispcnt,line,bg_lines,used,objects,window,semi,&mut out[..rw],counts,0,rw);
         out
     };
+    if (8..100).contains(&line) {
+        mem.menu_screen.label_pixels+=(1..4).filter(|&bg|bg_used[bg])
+            .map(|bg|bg_lines[bg][ex..ex+VISIBLE_WIDTH].iter().filter(|&&p|p!=TRANSPARENT).count() as u32).sum::<u32>();
+    }
     let only_background=[bg_used[0],false,false,false];
     let background=compose_with(mem,&only_background,&[OBJ_EMPTY;MAX_RENDER_WIDTH],&[false;MAX_RENDER_WIDTH],false,&mut counts);
-    for group in 0..2u8 {
+    // The ellipse group has no background at all: its raw colours.
+    let empty=compose_with(mem,&[false;4],&[OBJ_EMPTY;MAX_RENDER_WIDTH],&[false;MAX_RENDER_WIDTH],false,&mut counts);
+    for group in 0..3u8 {
         let used:[bool;4]=std::array::from_fn(|bg|bg_used[bg] && crate::menu_screen::bg_in_group(template,bg,line,group));
         let mut objects=[OBJ_EMPTY;MAX_RENDER_WIDTH];
         let mut window=[false;MAX_RENDER_WIDTH];
@@ -602,7 +608,8 @@ fn capture_menu_groups(mem:&mut MemMap,dispcnt:u16,line:usize,bg_lines:&[Line;4]
         let target=&mut mem.menu_screen.groups[(group as usize*160+line)*VISIBLE_WIDTH..][..VISIBLE_WIDTH];
         for (x,pixel) in target.iter_mut().enumerate() {
             let p=picture[ex+x];
-            *pixel=if p==background[ex+x]{crate::menu_screen::TRANSPARENT}else{p};
+            let base=if group==2 {empty[ex+x]}else{background[ex+x]};
+            *pixel=if p==base{crate::menu_screen::TRANSPARENT}else{p};
         }
     }
     background
@@ -2908,7 +2915,7 @@ fn render_sprites_extent(
         }
     });
     for ([a0, a1, a2], coordinates, owner, stats_background, stats_inner_padding, guest_slot) in expanded {
-        if !crate::menu_screen::sprite_visible(mem, guest_slot, a0, a1) {
+        if !crate::menu_screen::sprite_visible(mem, guest_slot, a0, a1, a2) {
             continue;
         }
         // Unused FFTA OAM slots park offscreen at (248,168). Vertical zoom

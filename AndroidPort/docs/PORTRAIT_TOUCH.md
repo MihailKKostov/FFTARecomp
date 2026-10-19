@@ -126,6 +126,31 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+**Party screens as one layout (0.35)** (`menu_layout.rs`). The upper half
+always shows the whole party; the lower half the selected unit (the roster's
+unit panel, or the unit's status, Equip, Abilities, Jobs screen in one piece,
+docked to the bottom).
+- The game only draws the party on the roster. Each unit's cell (sprite and
+  "No." label, neighbours' labels masked out) and the hint bar are kept from
+  the settled roster (bar drawn, and BG text between bar and panel present:
+  the game erases the labels first when it leaves) and laid out three to a
+  row (four beyond nine units), centred and spread over the upper half.
+- The game's selection ellipse is captured as its own picture (semi-
+  transparent OBJ, raw colours) and blended under the unit selected now
+  (EWRAM 0xfd3e, also on unit screens).
+- The roster's unit-panel portrait (priority 1) always belongs to the panel,
+  also host sprite copies, so it is never split across the screen (fixes the
+  cut portrait on the roster).
+- Taps: a unit on the roster moves the game's cursor there one press at a
+  time (each waits until the cursor rests) and opens it with A; on unit
+  screens the game's own Left/Right switches units, the shorter way round.
+  The hint bar's thirds press L, Start and R. Menu and list rows
+  (MENU, EQUIP, ITEMS, ABILITIES) move the game's cursor (OAM tiles
+  0x120-0x127) with Up/Down to the tapped row and press A.
+- Audited frame by frame: fade in and out, cursor moves, roster to status
+  and back, Equip and Items lists, menu taps, unit switching by tap.
+  Landscape unchanged.
+
 **In-game Menu button (0.34).** The world map Menu button is now part of
 the game picture, built only from the game's own resources (`map_menu.rs`):
 the menu window's bar, translucent body (BLDALPHA) and item gem tiles, which

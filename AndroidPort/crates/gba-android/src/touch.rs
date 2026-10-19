@@ -216,9 +216,21 @@ impl Engine {
         }else{
             let nx=(px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32-mem::extra() as f32;
             let ny=(py-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32-mem::extra_y() as f32;
-            // Portrait Party screens: undo the group's move; taps between the groups do nothing.
+            // Portrait Party screens: the party above, the unit's screen below; taps between do nothing.
             let ny=match self.menu_layout {
-                Some(layout)=>match layout.native_row(ny) {Some(row)=>row,None=>return},
+                Some(layout)=>match layout.hit(nx,ny) {
+                    crate::menu_layout::Hit::Unit(i)=>{self.party_tap(&layout,i);return}
+                    crate::menu_layout::Hit::Bar(key)=>{
+                        // The roster's own hint bar: L Change, Start Item List, R Sort.
+                        if layout.roster_live {self.mouse.cancel();battle::press(&mut self.machine.bus,key);}
+                        return
+                    }
+                    crate::menu_layout::Hit::Lower(y)=>{
+                        if layout.template!=gba_core::menu_screen::Template::Roster && self.party_menu_tap(nx,y) {return}
+                        y
+                    }
+                    crate::menu_layout::Hit::None=>return,
+                },
                 None=>ny,
             };
             if let Some(keys)=self.usa.then(||crate::title_touch::keys(&self.machine.bus,nx,ny)).flatten(){
@@ -234,6 +246,48 @@ impl Engine {
         if !handled {self.mouse.cancel();battle::press(&mut self.machine.bus,0x3fe);}
         #[cfg(target_os="android")]
         eprintln!("FFTA_TOUCH click x={x:.3} y={y:.3} handled={handled}");
+    }
+    /// Party menus and lists (MENU, EQUIP, ITEMS, ABILITIES): the game's own
+    /// cursor (OAM tiles 0x120-0x127, priority 0; with two lists shown the
+    /// later one is active) sits beside the selected row, rows 16 apart. A tap
+    /// on a row with text in the cursor's column moves it with Up/Down and
+    /// chooses with A, like the other touch menus. Returns false (the caller
+    /// falls back) when there is no cursor.
+    fn party_menu_tap(&mut self,x:f32,y:f32)->bool{
+        let bus=&self.machine.bus;
+        let Some((cx,cy))=crate::engine::party_cursor(bus) else {return false};
+        if x<(cx-8) as f32 || x>(cx+120) as f32 {return true;}
+        let steps=((y-(cy-4) as f32)/16.).floor() as i32;
+        // The tapped row must hold text right of the cursor (both groups: the
+        // unit screen is drawn in one piece).
+        let row=cy-4+steps*16;
+        let groups=&bus.menu_screen.groups;
+        let text=(row.max(0)..(row+16).min(160)).any(|r|(cx+8..(cx+100).min(240)).any(|c|{
+            (0..2).any(|g|groups.get(g*240*160+(r*240+c) as usize).is_some_and(|&p|p!=gba_core::menu_screen::TRANSPARENT))
+        }));
+        if !text {return true;}
+        self.mouse.cancel();
+        self.party_goal=Some(crate::engine::PartyGoal{target:0,forward:true,confirm:true,deadline:self.machine.bus.frames+600,
+            pressed:None,cursor:[0;4],still:0,row:Some(row+4)});
+        true
+    }
+    /// A tap on a unit in the party picture: on the roster the game's cursor
+    /// moves there and A opens the unit; on unit screens the game's own
+    /// Left/Right unit cycling switches to it.
+    fn party_tap(&mut self,layout:&crate::menu_layout::MenuLayout,target:usize){
+        use gba_core::menu_screen::Template;
+        if !self.party_cache.as_ref().is_some_and(|cache|cache.has_unit(target)) {return;}
+        let confirm=match layout.template {
+            Template::Roster if layout.roster_live => true,
+            Template::Unit => false,
+            _ => return,
+        };
+        let index=self.machine.bus.ewram.get(0xfd3e).copied().unwrap_or(0) as usize;
+        let count=self.party_cache.as_ref().map_or(1,|cache|cache.count()).max(1);
+        // The roster cursor walks the slots; unit screens cycle around the party.
+        let forward=if confirm {target>index} else {(target+count-index)%count<=count/2};
+        self.mouse.cancel();
+        self.party_goal=Some(crate::engine::PartyGoal{target,forward,confirm,deadline:self.machine.bus.frames+600,pressed:None,cursor:[0;4],still:0,row:None});
     }
     pub fn export_ui(&self,packed:&mut [u8],params:&mut [f32],background:&mut [i32]){
         // Slots of 9 floats: rect, clip, layer + 2 when it blends over the stats background.

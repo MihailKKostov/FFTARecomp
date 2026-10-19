@@ -808,6 +808,11 @@ pub fn world_select(mem:&mut MemMap,x:f32,y:f32,confirm:bool)->bool {
 }
 /// Plain A/B also work in dialogue, forecasts and unsupported menu contexts.
 pub fn press(mem:&mut MemMap,key:u16)->bool {press_sequence(mem,&[key])}
+/// No queued or held synthetic press.
+pub fn idle(mem:&MemMap)->bool {
+    let s=&mem.ffta_battle_mouse;
+    s.buttons.is_empty() && s.button_hold==0 && s.button_release==0
+}
 pub fn press_sequence(mem:&mut MemMap,keys:&[u16])->bool {
     if !mem.ffta_battle_mouse.enabled {return false;}
     let state=&mut mem.ffta_battle_mouse;

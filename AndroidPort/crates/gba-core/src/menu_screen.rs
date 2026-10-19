@@ -37,9 +37,15 @@ pub struct MenuScreen {
     pub frame: bool,
     frame_before: bool,
     pub template: Template,
-    /// Two 240x160 RGB555 pictures (upper, lower group), TRANSPARENT where empty.
+    /// Three 240x160 RGB555 pictures (upper group, lower group, roster
+    /// selection ellipse), TRANSPARENT where empty. The ellipse is semi-
+    /// transparent: its picture holds the raw sprite colours (no background),
+    /// so the frontend can blend it under any unit (BLDALPHA).
     pub groups: Vec<u16>,
-    /// Group of each guest OAM slot (0 upper, 1 lower) for this frame.
+    /// BG1-3 pixels drawn in native rows 8-99 this frame (on the roster: its
+    /// "No." labels, which the game erases first when it leaves the roster).
+    pub label_pixels: u32,
+    /// Group of each guest OAM slot (0 upper, 1 lower, 2 ellipse) for this frame.
     pub(crate) slot_group: Vec<u8>,
     /// Sprite group being rendered (None: all sprites).
     pub(crate) rendering: Option<u8>,
@@ -98,8 +104,12 @@ pub(crate) fn object_box(a0: u16, a1: u16) -> Option<[i32; 4]> {
 
 /// Objects of the same priority whose boxes overlap or touch form one picture (a
 /// portrait, a unit with its shadow); each picture goes to the group of its
-/// centre row, so no picture is ever split.
-pub fn sprite_groups(oam: &[u8], cut: i32) -> Vec<u8> {
+/// centre row, so no picture is ever split. On the roster the unit panel's
+/// portrait (priority 1, parts not always touching) is always in the lower
+/// group and the semi-transparent selection ellipse is a group of its own.
+pub fn sprite_groups(oam: &[u8], template: Template) -> Vec<u8> {
+    let cut = template.cut();
+    let roster = template == Template::Roster;
     let entries: Vec<Option<([i32; 4], u16)>> = (0..128).map(|i| {
         let (a0, a1, a2) = (half(oam, i * 8), half(oam, i * 8 + 2), half(oam, i * 8 + 4));
         object_box(a0, a1).map(|b| (b, (a2 >> 10) & 3))
@@ -127,6 +137,11 @@ pub fn sprite_groups(oam: &[u8], cut: i32) -> Vec<u8> {
         }
     }
     (0..128).map(|i| {
+        let a0 = half(oam, i * 8);
+        if roster && entries[i].is_some() {
+            if (a0 >> 10) & 3 == 1 { return 2; }
+            if entries[i].is_some_and(|(_, p)| p == 1) { return 1; }
+        }
         let (top, bottom) = span[root(&mut parent, i)];
         u8::from(entries[i].is_some() && top + bottom >= 2 * cut)
     }).collect()
@@ -138,6 +153,7 @@ pub fn begin_frame(mem: &mut MemMap) {
     mem.menu_screen.frame_before = mem.menu_screen.frame;
     mem.menu_screen.frame = frame;
     mem.menu_screen.rendering = None;
+    mem.menu_screen.label_pixels = 0;
     if !frame { return; }
     let previous = if mem.menu_screen.frame_before { mem.menu_screen.template } else { Template::Roster };
     let template = match (unit_screen(mem), headerless(mem)) {
@@ -149,9 +165,9 @@ pub fn begin_frame(mem: &mut MemMap) {
         _ => Template::Roster,
     };
     mem.menu_screen.template = template;
-    mem.menu_screen.slot_group = sprite_groups(&mem.oam, template.cut());
+    mem.menu_screen.slot_group = sprite_groups(&mem.oam, template);
     mem.menu_screen.groups.clear();
-    mem.menu_screen.groups.resize(2 * 240 * 160, TRANSPARENT);
+    mem.menu_screen.groups.resize(3 * 240 * 160, TRANSPARENT);
 }
 
 /// Whether BG `bg` belongs to group `group` on native row `line`: BG1 (and
@@ -159,6 +175,7 @@ pub fn begin_frame(mem: &mut MemMap) {
 /// BG2/BG3 menu planes always belong to the lower group, so Equip and
 /// ability panels overlapping the header separator move with their lists.
 pub(crate) fn bg_in_group(template: Template, bg: usize, line: usize, group: u8) -> bool {
+    if group == 2 { return false; }
     let lower = match (template, bg) {
         (_, 0) => return true,
         (Template::Whole, _) | (Template::Unit, 2 | 3) => true,
@@ -168,12 +185,15 @@ pub(crate) fn bg_in_group(template: Template, bg: usize, line: usize, group: u8)
 }
 
 /// Group of a sprite while a group is being rendered: guest slots use the
-/// frame's assignment, other (host) objects their own centre row.
-pub(crate) fn sprite_visible(mem: &MemMap, slot: Option<usize>, a0: u16, a1: u16) -> bool {
+/// frame's assignment, other (host) copies the same rules by themselves.
+pub(crate) fn sprite_visible(mem: &MemMap, slot: Option<usize>, a0: u16, a1: u16, a2: u16) -> bool {
     let Some(group) = mem.menu_screen.rendering else { return true };
+    let template = mem.menu_screen.template;
     let assigned = match slot {
         Some(i) => mem.menu_screen.slot_group.get(i).copied().unwrap_or(1),
-        None => object_box(a0, a1).map_or(1, |b| u8::from(b[1] + b[3] >= 2 * mem.menu_screen.template.cut())),
+        None if template == Template::Roster && (a0 >> 10) & 3 == 1 => 2,
+        None if template == Template::Roster && (a2 >> 10) & 3 == 1 => 1,
+        None => object_box(a0, a1).map_or(1, |b| u8::from(b[1] + b[3] >= 2 * template.cut())),
     };
     assigned == group
 }
@@ -197,11 +217,18 @@ mod tests {
         for (i, [a0, a1, a2]) in [[0xa058, 0xd000, 0x0618], [0xa058, 0x9020, 0x0658], [0xa078, 0x9020, 0x0668],
             [0xa058, 0x5030, 0x0678], [0x2048, 0x5030, 0x0680], [0x6048, 0x1020, 0x0688], [0x2040, 0x1030, 0x068c],
             [0x0034, 0x8018, 0x48d0]].into_iter().enumerate() { put(&mut oam, 3 + i, a0, a1, a2); }
-        let unit = sprite_groups(&oam, Template::Unit.cut());
+        let unit = sprite_groups(&oam, Template::Unit);
         assert_eq!(&unit[..3], &[0, 0, 1]);
-        assert!(sprite_groups(&oam, Template::Whole.cut()).iter().take(11).all(|&g| g == 1));
-        let roster = sprite_groups(&oam, Template::Roster.cut());
+        assert!(sprite_groups(&oam, Template::Whole).iter().take(11).all(|&g| g == 1));
+        let roster = sprite_groups(&oam, Template::Roster);
         assert_eq!(&roster[3..11], &[1, 1, 1, 1, 1, 1, 1, 0]);
+        // Roster: the selection ellipse (semi-transparent) is its own group; a
+        // stray priority-1 portrait part above the cut stays with the panel.
+        put(&mut oam, 20, 0x441c, 0x8040, 0xcdb0);
+        put(&mut oam, 21, 0x2010, 0x1000, 0x068c);
+        let roster = sprite_groups(&oam, Template::Roster);
+        assert_eq!((roster[20], roster[21]), (2, 1));
+        assert_eq!(sprite_groups(&oam, Template::Unit)[20], 0);
         assert_eq!(roster[100], 0);
     }
     #[test]
@@ -213,5 +240,6 @@ mod tests {
         assert!(bg_in_group(Template::Roster, 2, 120, 1));
         assert!(bg_in_group(Template::Roster, 0, 120, 0) && bg_in_group(Template::Roster, 0, 120, 1));
         assert!(bg_in_group(Template::Whole, 1, 2, 1) && bg_in_group(Template::Whole, 3, 0, 1));
+        assert!((0..4).all(|bg| !bg_in_group(Template::Roster, bg, 40, 2)));
     }
 }
