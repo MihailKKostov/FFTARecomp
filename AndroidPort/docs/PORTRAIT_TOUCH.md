@@ -126,6 +126,27 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.37-android-preview
+
+**Return only where the menu has no Leave.** Town scenes show no button row on
+their root menus (town_layout, e.g. the shop's Buy/Sell/Leave), which have Leave;
+lists and sub-screens keep Return (B). Party screens keep Return.
+
+**Shop lists by touch.** A tap on an item moves the game's cursor to it (Up or
+Down until the pointer, OAM tile 0x120, rests on the row) without choosing
+it, so its stats and Info show that item; a tap on the selected item chooses
+it (A) and the game asks the quantity. The row is Buy (Sell in the sell list,
+A on the selected item and then on the quantity), Info (R, while the game
+shows its "R Info" hint) and Return. Measured: tap Green Beret, its stats
+show; Info opens and closes its abilities; Buy, quantity, purchase
+(5000 -> 4200).
+
+**Party grid as on the roster.** The units keep the roster's own spacing: four
+to a row 48 apart, rows 40 apart, every other row 24 to the left, under the
+hint bar, the bar and units centred in the upper half. A party taller than the
+half scrolls. Cells overlap as on the roster; a tap on a "No." label picks its
+unit, elsewhere the unit whose sprite is nearest.
+
 ## 0.36-android-preview
 
 **Resume where the game was left.** gba-core `savestate.rs` stores the whole
@@ -171,7 +192,8 @@ docked to the bottom).
   "No." label, neighbours' labels masked out) and the hint bar are kept from
   the settled roster (bar drawn, and BG text between bar and panel present:
   the game erases the labels first when it leaves) and laid out three to a
-  row (four beyond nine units), centred and spread over the upper half.
+  row (four beyond nine units), centred and spread over the upper half
+  (0.37: the roster's own spacing, see above).
 - The game's selection ellipse is captured as its own picture (semi-
   transparent OBJ, raw colours) and blended under the unit selected now
   (EWRAM 0xfd3e, also on unit screens).

@@ -25,6 +25,8 @@ const BAR_ROWS: i32 = 8;
 const CELL: [i32; 2] = [0, 2];
 const CELL_W: i32 = 32;
 const CELL_H: i32 = 47;
+/// First cell row of the "No." label.
+const LABEL_ROW: i32 = 39;
 const MAX_UNITS: usize = 24;
 /// Rows kept free below the unit screen for the button row.
 const BUTTON_ROW: i32 = crate::game_buttons::ROW_HEIGHT;
@@ -103,45 +105,51 @@ impl PartyCache {
     }
 }
 
-/// Upper-half party grid in native-relative rows (`top`..`bottom`): the bar
-/// on top, below it the units three to a row in the roster's own zig-zag
-/// (every other row half a step to the right, so rows can sit closer than a
-/// cell is tall). Rows spread out to fill the half; a party taller than the
-/// half scrolls (`scroll` rows, up to `max_scroll`).
+/// Upper-half party grid in native-relative rows (`top`..`bottom`): the
+/// roster as the game draws it (its hint bar, then four units to a row in its
+/// zig-zag: rows 40 apart, every other row 24 further left), centred in the
+/// half. A party taller than the half scrolls (`scroll` rows).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PartyGrid { pub top: i32, pub bottom: i32, pub count: usize, pub scroll: i32 }
 
-const COLUMNS: usize = 3;
-const PITCH_X: i32 = 72;
-const ZIG: i32 = PITCH_X / 2;
-/// Row pitch range: the roster's own 40 rows up to a roomy 64.
-const PITCH_Y: (i32, i32) = (40, 64);
+const COLUMNS: usize = 4;
+const PITCH_Y: i32 = 40;
+/// Rows between the bar and the first unit cell, as on the roster (slot 8, cell +2).
+const BAR_GAP: i32 = 2;
 
 impl PartyGrid {
     fn rows(&self) -> i32 { self.count.div_ceil(COLUMNS).max(1) as i32 }
+    fn content(&self) -> i32 { (self.rows() - 1) * PITCH_Y + CELL_H }
+    /// The bar's first row: the bar and the units centred in the half, or at
+    /// its top when they do not fit.
+    pub fn bar(&self) -> i32 {
+        let block = BAR_ROWS + BAR_GAP + self.content();
+        self.top + ((self.bottom - self.top - block) / 2).max(0)
+    }
     /// Rows where units are shown (below the bar).
-    pub fn area(&self) -> (i32, i32) { (self.top + BAR_ROWS + 6, self.bottom) }
-    fn pitch_y(&self) -> i32 {
-        let (a, b) = self.area();
-        if self.rows() < 2 { return PITCH_Y.1; }
-        ((b - a - CELL_H) / (self.rows() - 1)).clamp(PITCH_Y.0, PITCH_Y.1)
-    }
-    fn content(&self) -> i32 { (self.rows() - 1) * self.pitch_y() + CELL_H }
-    pub fn max_scroll(&self) -> i32 { let (a, b) = self.area(); (self.content() - (b - a)).max(0) }
-    /// Top-left of unit `i`'s cell.
+    pub fn area(&self) -> (i32, i32) { (self.bar() + BAR_ROWS, self.bottom) }
+    pub fn max_scroll(&self) -> i32 { let (a, b) = self.area(); (BAR_GAP + self.content() - (b - a)).max(0) }
+    /// Top-left of unit `i`'s cell (the roster slot, moved into the half).
     pub fn cell(&self, i: usize) -> [i32; 2] {
-        let (row, column) = ((i / COLUMNS) as i32, (i % COLUMNS) as i32);
-        let width = (COLUMNS as i32 - 1) * PITCH_X + CELL_W + ZIG;
-        let (a, b) = self.area();
-        let first = a + (b - a - self.content()).max(0) / 2 - self.scroll.clamp(0, self.max_scroll());
-        [(240 - width) / 2 + column * PITCH_X + (row % 2) * ZIG, first + row * self.pitch_y()]
+        let [x, y] = slot(i);
+        [x + CELL[0], self.area().0 + BAR_GAP + (y - slot(0)[1]) - self.scroll.clamp(0, self.max_scroll())]
     }
+    /// Cells overlap like the roster's (a unit's "No." label beside the heads
+    /// of the next row): a label belongs to its unit, otherwise the unit whose
+    /// sprite is nearest the tap wins.
     pub fn unit_at(&self, x: f32, y: f32) -> Option<usize> {
         let (a, b) = self.area();
         if y < a as f32 || y >= b as f32 { return None; }
-        (0..self.count).find(|&i| {
+        let inside = |i: usize, rows: (i32, i32)| {
             let [cx, cy] = self.cell(i).map(|v| v as f32);
-            x >= cx - 4. && x < cx + CELL_W as f32 + 4. && y >= cy && y < cy + CELL_H as f32
+            x >= cx - 4. && x < cx + CELL_W as f32 + 4. && y >= cy + rows.0 as f32 && y < cy + rows.1 as f32
+        };
+        (0..self.count).find(|&i| inside(i, (LABEL_ROW, CELL_H))).or_else(|| {
+            (0..self.count).filter(|&i| inside(i, (0, CELL_H))).min_by_key(|&i| {
+                let [cx, cy] = self.cell(i);
+                let (dx, dy) = (x - (cx + CELL_W / 2) as f32, y - (cy + LABEL_ROW / 2) as f32);
+                (dx * dx + dy * dy) as i64
+            })
         })
     }
 }
@@ -164,7 +172,7 @@ impl MenuLayout {
     /// What a tap at native-relative texture point (x, y) lands on.
     pub fn hit(&self, x: f32, y: f32) -> Hit {
         if let Some(grid) = self.grid {
-            if y >= grid.top as f32 && y < (grid.top + BAR_ROWS) as f32 {
+            if y >= grid.bar() as f32 && y < (grid.bar() + BAR_ROWS) as f32 {
                 // The bar's L, Start and R thirds, as printed on it.
                 return Hit::Bar(if x < 80. { 0x1ff } else if x < 160. { 0x3f7 } else { 0x2ff });
             }
@@ -233,7 +241,7 @@ pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut O
         *scroll = (*scroll).clamp(0, grid.max_scroll());
         grid.scroll = *scroll;
         let area = grid.area();
-        blit(&kept.bar, 240, 0, grid.top, false, all);
+        blit(&kept.bar, 240, 0, grid.bar(), false, all);
         if index < grid.count {
             let [cx, cy] = grid.cell(index);
             blit(&kept.ellipse, 240, cx - kept.ellipse_cell[0], cy - kept.ellipse_cell[1], true, area);
@@ -269,32 +277,35 @@ mod tests {
         assert_eq!([slot(0), slot(1), slot(2), slot(5)], [[48, 8], [96, 8], [144, 8], [72, 48]]);
     }
     #[test]
-    fn the_party_zig_zags_three_to_a_row_and_scrolls_when_taller_than_the_half() {
+    fn the_party_keeps_the_rosters_four_to_a_row_zig_zag_and_scrolls_when_tall() {
         let grid = PartyGrid { top: -140, bottom: 90, count: 6, scroll: 0 };
         let cells: Vec<_> = (0..6).map(|i| grid.cell(i)).collect();
-        // Rows of three, the second half a step right; centred, below the bar.
-        assert_eq!(cells[0][1], cells[2][1]);
-        assert_eq!(cells[3][0] - cells[0][0], ZIG);
-        assert_eq!(cells[0][0] + cells[5][0] + CELL_W, 240);
-        assert!(cells[0][1] >= grid.area().0 && cells[5][1] + CELL_H <= grid.bottom);
+        // The roster's own spacing: 48 across, rows 40 apart, the second row 24 to the left.
+        assert_eq!((cells[1][0] - cells[0][0], cells[1][1] - cells[0][1]), (48, 0));
+        assert_eq!((cells[4][0] - cells[0][0], cells[4][1] - cells[0][1]), (-24, 40));
+        // Bar and units centred in the half, the bar just above the units.
+        let (bar, end) = (grid.bar(), cells[5][1] + CELL_H);
+        assert!(((bar - grid.top) - (grid.bottom - end)).abs() <= 1);
+        assert_eq!(cells[0][1], bar + BAR_ROWS + BAR_GAP);
         assert_eq!(grid.max_scroll(), 0);
         assert_eq!(grid.unit_at((cells[4][0] + 16) as f32, (cells[4][1] + 20) as f32), Some(4));
-        assert_eq!(grid.unit_at(1., (cells[4][1] + 20) as f32), None);
-        // Twenty units do not fit: they scroll, and a scrolled unit is tapped where it is drawn.
-        let full = PartyGrid { count: 20, ..grid };
-        assert!(full.max_scroll() > 0 && full.pitch_y() == PITCH_Y.0);
-        let scrolled = PartyGrid { scroll: 40, ..full };
-        assert_eq!(scrolled.cell(9)[1], full.cell(9)[1] - 40);
+        // Where cells overlap (row 2 under row 1), the nearer unit is chosen.
+        assert_eq!(grid.unit_at((cells[0][0] + 2) as f32, (cells[0][1] + 44) as f32), Some(0));
+        assert_eq!(grid.unit_at((cells[4][0] + 16) as f32, (cells[4][1] + 10) as f32), Some(4));
+        // Twenty-four units do not fit: they scroll, tapped where drawn.
+        let full = PartyGrid { count: 24, ..grid };
+        assert!(full.max_scroll() > 0);
+        let scrolled = PartyGrid { scroll: full.max_scroll(), ..full };
+        assert_eq!(scrolled.cell(9)[1], full.cell(9)[1] - full.max_scroll());
         let [x, y] = scrolled.cell(9);
         assert_eq!(scrolled.unit_at((x + 16) as f32, (y + 20) as f32), Some(9));
-        // Scrolling never runs past the last row.
-        assert_eq!(PartyGrid { scroll: 10_000, ..full }.cell(19), PartyGrid { scroll: full.max_scroll(), ..full }.cell(19));
+        assert_eq!(PartyGrid { scroll: 10_000, ..full }.cell(23), PartyGrid { scroll: full.max_scroll(), ..full }.cell(23));
     }
     #[test]
     fn taps_land_on_the_bar_units_and_the_lower_block() {
         let grid = PartyGrid { top: -140, bottom: 90, count: 6, scroll: 0 };
         let layout = MenuLayout { template: Template::Unit, roster_live: false, grid: Some(grid), lower_shift: 160, lower_start: 0 };
-        assert!(matches!(layout.hit(120., -136.), Hit::Bar(0x3f7)));
+        assert!(matches!(layout.hit(120., (grid.bar() + 4) as f32), Hit::Bar(0x3f7)));
         let [cx, cy] = grid.cell(2);
         assert!(matches!(layout.hit((cx + 10) as f32, (cy + 10) as f32), Hit::Unit(2)));
         assert!(matches!(layout.hit(100., 230.), Hit::Lower(y) if y == 70.));

@@ -28,6 +28,13 @@ pub(crate) struct PartyGoal {
     pub row:Option<i32>,
 }
 
+/// The shop's Buy/Sell list cursor: the menu pointer at the list's left edge.
+pub(crate) fn shop_list_cursor(bus:&gba_core::mem::MemMap)->Option<(i32,i32)>{
+    let state=&bus.ffta_dialogue;
+    if !state.shop_layout || state.town_layout {return None;}
+    party_cursor(bus).filter(|&(x,_)|x<16)
+}
+
 /// The game's menu cursor on Party screens (OAM tiles 0x120-0x127, priority 0;
 /// with two lists shown the later one is the active list's).
 pub(crate) fn party_cursor(bus:&gba_core::mem::MemMap)->Option<(i32,i32)>{
@@ -61,6 +68,8 @@ pub struct Engine {
     pub(crate) party_goal: Option<PartyGoal>,
     /// Native rows the party grid is scrolled by (menu_layout.rs).
     pub(crate) party_scroll: i32,
+    /// Town root menu (item count, selected item) last shown: names the shop list's button.
+    shop_choice: (u8,u8),
     /// Last battery save written, and the frame of the last resume state.
     last_battery: Option<Vec<u8>>,
     resume_frame: u64,
@@ -183,10 +192,18 @@ impl Engine {
         }
         if self.menu_layout.is_some() {return row(&bus.rom,236,&[("Return",back,false)]);}
         if self.town_buttons() {
+            // Menus offering Leave (the town root menus) have no Return; lists
+            // and other sub-menus (a menu pointer, no root menu) do.
+            if bus.ffta_dialogue.town_layout || party_cursor(bus).is_none() {return Vec::new();}
             let half=|o:&[u8],i:usize|u16::from_le_bytes([o[i],o[i+1]]);
             let hint=bus.oam.chunks_exact(8).any(|o|half(o,0)&0x300!=0x200 && (0x2d4..=0x2d9).contains(&(half(o,4)&1023)) && (half(o,4)>>10)&3==0);
-            let items=[("Info",info,false),("Return",back,false)];
-            return row(&bus.rom,236,&items[if hint {0} else {1}..]);
+            if shop_list_cursor(bus).is_some() {
+                // Shop lists: choose the selected item (and confirm its quantity), its info, back.
+                let choose=if self.shop_choice==(3,1) {"Sell"} else {"Buy"};
+                let items=[(choose,0x3fe,false),("Info",info,false),("Return",back,false)];
+                return if hint {row(&bus.rom,236,&items)} else {row(&bus.rom,236,&[items[0],items[2]])};
+            }
+            return row(&bus.rom,236,&[("Return",back,false)]);
         }
         Vec::new()
     }
@@ -198,7 +215,7 @@ impl Engine {
     fn drive_party_goal(&mut self){
         let Some(mut goal)=self.party_goal else {return};
         let bus=&mut self.machine.bus;
-        if bus.frames>goal.deadline || !bus.menu_screen.frame {self.party_goal=None;return;}
+        if bus.frames>goal.deadline || (goal.row.is_none() && !bus.menu_screen.frame) {self.party_goal=None;return;}
         if !battle::idle(bus) {return;}
         if let Some(row)=goal.row {
             // Menu rows: Up/Down until the cursor rests on the row, then A.
@@ -207,7 +224,7 @@ impl Engine {
             goal.cursor[0]=y as u8;
             self.party_goal=Some(goal);
             if goal.still<4 {return;}
-            if y==row {battle::press(bus,0x3fe);self.party_goal=None;return;}
+            if y==row {if goal.confirm {battle::press(bus,0x3fe);} self.party_goal=None;return;}
             battle::press(bus,if row>y {0x37f} else {0x3bf});
             goal.still=0;
             self.party_goal=Some(goal);
@@ -282,7 +299,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -449,6 +466,9 @@ impl Engine {
         // The app's own Menu button stands in only where the game's resources are missing.
         self.menu_button=if self.buttons.is_empty() {self.map_menu_button()} else {None};
         let state=&self.machine.bus.ffta_dialogue;
+        if state.town_layout {
+            if let Some(menu)=battle::MenuScene::read(&self.machine.bus) {self.shop_choice=(menu.count,menu.selected);}
+        }
         if state.town_layout {self.town_menu=crate::touch::town_menu(state).or(self.town_menu);}
         else if !state.shop_layout {self.town_menu=None;}
         self.frame_ns = start.elapsed().as_nanos() as u64;
