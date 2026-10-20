@@ -114,6 +114,9 @@ pub struct DialogueState {
     /// BG2 and BG3 maps (32x32 entries each) of the last shop frame without
     /// the Info window: the game writes the window over the list's map.
     pub(crate) shop_maps: Option<Vec<u16>>,
+    /// Touch-only portrait: shops show an Info button instead of the game's
+    /// "R Info" hint (OAM tiles 0x2d4-0x2d9, priority 0), which is not drawn.
+    pub hide_info_hint: bool,
 }
 
 pub fn enabled() -> bool {

@@ -126,6 +126,13 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.39-android-preview
+
+**No "R Info" hint in touch-only shops.** The game's hint (OAM tiles
+0x2d4-0x2d9, priority 0, beside the shop picture) is not drawn in portrait
+touch-only shops, where the Info button replaces it; the button still
+appears exactly when the game offers Info (the hint is read from OAM).
+
 ## 0.38-android-preview
 
 **Taps jump straight to their entry, everywhere they used to step.** The

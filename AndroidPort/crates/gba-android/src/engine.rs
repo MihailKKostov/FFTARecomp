@@ -449,6 +449,8 @@ impl Engine {
         self.machine.bus.world_hud.enabled=extra_x<=8 && 160+2*extra_y>=360;
         self.machine.bus.ffta_dialogue.docked=self.machine.bus.world_hud.enabled && self.ui_dock.is_some();
         self.machine.bus.menu_screen.enabled=self.machine.bus.ffta_dialogue.docked;
+        // The shop's Info button (scene_buttons) stands in for the game's "R Info" hint.
+        self.machine.bus.ffta_dialogue.hide_info_hint=self.touch_enabled && crate::game_buttons::available(&self.machine.bus.rom);
         self.audio.clear();
         self.pcm.begin(count.clamp(1,8),mode,
             self.cache_dir.as_deref().unwrap_or(&std::env::temp_dir()))?;

@@ -3000,6 +3000,10 @@ fn render_sprites_extent(
         if !crate::menu_screen::sprite_visible(mem, guest_slot, a0, a1, a2) {
             continue;
         }
+        if mem.ffta_dialogue.hide_info_hint && mem.ffta_dialogue.docked && mem.ffta_dialogue.shop_layout
+            && (0x2d4..=0x2d9).contains(&(a2 & 1023)) && (a2 >> 10) & 3 == 0 {
+            continue;
+        }
         // Unused FFTA OAM slots park offscreen at (248,168). Vertical zoom
         // would unwrap that Y coordinate and expose tile zero in the sky.
         // Verified host objects carry full coordinates and are not filtered.
