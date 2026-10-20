@@ -663,6 +663,52 @@ fn notice_bounds(mem:&MemMap)->Option<[i32;4]> {
     }
     Some([l as i32,t as i32,r as i32,b as i32])
 }
+/// The shop's item Info window is open.
+pub fn shop_info_open(mem:&MemMap)->bool {shop_info_bounds(mem).is_some()}
+/// The shop list was kept to be drawn under the Info window.
+pub fn shop_list_kept(mem:&MemMap)->bool {mem.ffta_dialogue.shop_maps.is_some()}
+/// The shop's item Info window: WIN1 framing the window whose corners the
+/// game writes into BG3 (top-left 0xb00d, top-right 0xb00e). Measured 104x144
+/// at 128,8 (USA); the quantity window uses the same frame, but small.
+fn shop_info_bounds(mem:&MemMap)->Option<[i32;4]> {
+    if io16(mem,0)&0x4000==0 || io16(mem,0xc)!=0x0b08 || io16(mem,0xe)!=0x0a08 {return None;}
+    let h=io16(mem,0x42);let v=io16(mem,0x46);
+    let [l,t,r,b]=[(h>>8)as usize,(v>>8)as usize,(h&255)as usize,(v&255)as usize];
+    if l>=r || t>=b || r>240 || b>160 || r-l<96 || b-t<96 {return None;}
+    let base=0x0a*0x800;
+    let (hofs,vofs)=((io16(mem,0x1c)&511) as usize,(io16(mem,0x1e)&511) as usize);
+    let entry=|x:usize,y:usize|{let o=base+(((y+vofs)/8%32)*32+(x+hofs)/8%32)*2;u16::from_le_bytes([mem.vram[o],mem.vram[o+1]])};
+    (entry(l,t)==0xb00d && entry(r-8,t)==0xb00e).then_some([l as i32,t as i32,r as i32,b as i32])
+}
+/// Shop list pixels under the Info window: BG `bg` (2 text, 3 backing) of
+/// screen columns `x0..x1` on `line`, from the maps kept while it was closed.
+/// Not the Move/Jump/Evade panel (BG3 backing in palette 10, from a tile
+/// left of the window): the game hides its digits while the Info window is
+/// open. List rows take the highlight palette of their live entry left of
+/// the range.
+fn shop_list_under_info(mem:&MemMap,bg:usize,line:usize,out:&mut Line,x0:usize,x1:usize) {
+    let Some(maps)=&mem.ffta_dialogue.shop_maps else {return};
+    let cnt=io16(mem,8+bg*2);
+    let char_base=((cnt>>2)&3) as usize*0x4000;
+    let screen_base=((cnt>>8)&31) as usize*0x800;
+    let (hofs,vofs)=((io16(mem,0x10+bg*4)&511) as usize,(io16(mem,0x12+bg*4)&511) as usize);
+    let y=(line+vofs)%256;let (ty,py)=(y/8,y%8);
+    let live=|tx:usize|{let o=screen_base+(ty*32+tx%32)*2;u16::from_le_bytes([mem.vram[o],mem.vram[o+1]])};
+    let left=live(((x0+hofs)/8+31)%32);
+    let highlight=|p:u16|matches!(p>>12,0xb|0xc);
+    for x in x0..x1 {
+        let sx=(x+hofs)%256;
+        let mut entry=maps[(bg-2)*1024+ty*32+sx/8];
+        let (h3,v3)=((io16(mem,0x1c)&511) as usize,(io16(mem,0x1e)&511) as usize);
+        if maps[1024+((line+v3)%256/8)*32+(x+h3)%256/8]>>12==0xa {out[x]=TRANSPARENT;continue;}
+        if bg==2 && entry!=0 && highlight(entry) && left!=0 && highlight(left) {entry=(entry&0x0fff)|(left&0xf000);}
+        let fy=if entry&0x800!=0 {7-py}else{py};
+        let fx=if entry&0x400!=0 {7-sx%8}else{sx%8};
+        let byte=mem.vram[char_base+(entry&0x3ff) as usize*32+fy*4+fx/2];
+        let index=(byte>>(4*(fx&1)))&15;
+        out[x]=if index==0 {TRANSPARENT}else{pal16(mem,((entry>>12) as usize&15)*16+index as usize)};
+    }
+}
 fn begin_dialogue_frame(mem: &mut MemMap) {
     mem.ffta_dialogue.reuse_world_row=false;
     mem.ffta_dialogue.wide_pass = false;
@@ -672,6 +718,7 @@ fn begin_dialogue_frame(mem: &mut MemMap) {
     mem.ffta_dialogue.action_banner=None;
     mem.ffta_dialogue.town_layout=false;
     mem.ffta_dialogue.shop_layout=false;
+    mem.ffta_dialogue.shop_info=None;
     mem.ffta_dialogue.site_layout=false;
     mem.ffta_dialogue.town_menu_x=None;
     mem.ffta_dialogue.extra.kind=crate::ffta_dialogue::PanelKind::None;
@@ -720,6 +767,28 @@ fn begin_dialogue_frame(mem: &mut MemMap) {
     mem.ffta_dialogue.shop_layout=shop;
     mem.ffta_dialogue.town_layout=town;
     mem.ffta_dialogue.site_layout=site;
+    // Portrait docking only: there the Info window moves to the top.
+    if shop && !town && mem.ffta_dialogue.separate && mem.ffta_dialogue.docked {
+        if let Some(bounds)=shop_info_bounds(mem).filter(|_|mem.ffta_dialogue.shop_maps.is_some()) {
+            if mem.ffta_dialogue.extra.kind==crate::ffta_dialogue::PanelKind::None {
+                mem.ffta_dialogue.shop_info=Some(bounds);
+                mem.ffta_dialogue.extra.kind=crate::ffta_dialogue::PanelKind::Info;
+                mem.ffta_dialogue.extra.bounds=Some(bounds);
+                mem.ffta_dialogue.extra.pixels.resize(crate::ffta_dialogue::LAYER_WIDTH*160,Default::default());
+                mem.ffta_dialogue.extra.pixels.fill(Default::default());
+            }
+        } else if io16(mem,0xc)==0x0b08 && io16(mem,0xe)==0x0a08
+            // No window frame (BG3 palette 11: Info, also while it opens, or the
+            // quantity) where the Info window goes. WIN1 can stay on after it closes.
+            && !(1..19).any(|ty|(16..30).any(|tx|mem.vram[0x5000+(ty*32+tx)*2+1]>>4==0xb)) {
+            let maps=mem.ffta_dialogue.shop_maps.get_or_insert_with(||vec![0;2048]);
+            for (i,base) in [0x0b*0x800,0x0a*0x800].into_iter().enumerate() {
+                for (k,entry) in maps[i*1024..(i+1)*1024].iter_mut().enumerate() {
+                    *entry=u16::from_le_bytes([mem.vram[base+2*k],mem.vram[base+2*k+1]]);
+                }
+            }
+        }
+    } else if !shop {mem.ffta_dialogue.shop_maps=None;}
     if town || shop {
         // Town planes are captured as complete pixels, not action backing.
         // Discard any backing retained from the preceding battle panel.
@@ -908,6 +977,15 @@ fn capture_dialogue_part_impl<const FAST:bool,const LEAN:bool>(mem:&mut MemMap, 
         if LEAN && reusable_native_ui_row(mem,dispcnt,3,line){backing[..240].copy_from_slice(&world_bg[3][extra()..extra()+240]);}
         else{render_text_bg_hardware(mem,3,line,&mut backing,0,240);}
     }
+    // The shop list under the Info window, as it was before the window covered it.
+    let info=mem.ffta_dialogue.shop_info;
+    if let Some([l,t,r,b])=info.filter(|_|!extra_panel && !background_only) {
+        if (t..b).contains(&(line as i32)) {
+            let l=(l-8).max(0) as usize;
+            if ui_mask!=0 && used[2] {shop_list_under_info(mem,2,line,&mut text,l,r as usize);}
+            if ui_mask!=0 && used[3] {shop_list_under_info(mem,3,line,&mut backing,l,r as usize);}
+        }
+    }
     if background_only && mem.ffta_dialogue.action_layout {
         // Verified action-plane border tiles: header/footer and the info strip.
         // Keep dynamic action labels and portrait pixels out of the backing.
@@ -993,9 +1071,13 @@ fn capture_dialogue_part_impl<const FAST:bool,const LEAN:bool>(mem:&mut MemMap, 
                     && in_window_range((vv>>8) as u8,vv as u8,line as u8) {control=mask;}
             }
         }
+        // Shop Info: the window goes to the extra canvas, the list under it
+        // (with its own blending, outside WIN1) to the main canvas.
+        let info_inside=info.map(|[l,t,r,b]|x>=l && x<r && line as i32>=t && (line as i32)<b);
+        if info_inside==Some(true) && !extra_panel {control=winout&63;}
         let mut candidates=[(0u16,5usize,255u8,false);5];let mut n=0;
         let mut top=[(0u16,5usize,255u8,false);3];let mut nt=0;
-        let in_panel=if mem.ffta_dialogue.action_banner.is_some_and(|[l,t,r,b]|x>=l && x<r && line as i32>=t && (line as i32)<b){!extra_panel}
+        let in_panel=if let Some(inside)=info_inside {!extra_panel || inside} else if mem.ffta_dialogue.action_banner.is_some_and(|[l,t,r,b]|x>=l && x<r && line as i32>=t && (line as i32)<b){!extra_panel}
             else if (mem.ffta_dialogue.action_layout || mem.ffta_dialogue.town_layout) && matches!(mem.ffta_dialogue.extra.kind,crate::ffta_dialogue::PanelKind::Notice|crate::ffta_dialogue::PanelKind::Actions) {
                 let [l,t,r,b]=mem.ffta_dialogue.extra.bounds.unwrap();
                 (x>=l && x<r && line as i32>=t && (line as i32)<b)==extra_panel
@@ -1025,7 +1107,7 @@ fn capture_dialogue_part_impl<const FAST:bool,const LEAN:bool>(mem:&mut MemMap, 
             }
         }
         let obj=portraits[cx];
-        if obj.priority!=255 && control&16!=0 {
+        if obj.priority!=255 && control&16!=0 && info_inside.is_none_or(|inside|inside==extra_panel) {
             let candidate=(obj.color,4,obj.priority,obj.semi);
             if LEAN {ui_candidate_insert(&mut top,&mut nt,candidate);}
             else{candidates[n]=candidate;n+=1;}

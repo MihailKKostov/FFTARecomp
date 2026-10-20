@@ -18,6 +18,8 @@ pub mod engine;
 pub mod exec;
 pub mod ffta_battle_mouse;
 pub mod ffta_dialogue;
+pub mod ffta_graph_menu;
+pub mod ffta_row_list;
 pub mod ffta_log;
 pub mod ffta_mouse;
 pub mod ffta_movement;

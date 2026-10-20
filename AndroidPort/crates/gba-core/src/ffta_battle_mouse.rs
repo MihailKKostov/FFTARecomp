@@ -28,6 +28,8 @@ struct Request {
 #[derive(Default)]
 pub struct State {
     pub(crate) shop:crate::ffta_shop_mouse::State,
+    pub(crate) graph:crate::ffta_graph_menu::State,
+    pub(crate) rows:crate::ffta_row_list::State,
     profile: Option<Profile>,
     pub enabled: bool,
     request: Option<Request>,
@@ -335,7 +337,9 @@ impl MenuScene {
         let p=mem.ffta_battle_mouse.menu_profile?;
         let pc=if p.cursor==0x08018fc5 {0x71030}else{0x6eb48};
         if mem.rom.get(pc..pc+12)!=Some(&[0xf0,0xb5,0x87,0xb0,6,0x1c,0x11,0x4f,0x39,0x68,0x11,0x4a])
-            || h(&mem.io,0)?&0x4f07!=0x0f00 || h(&mem.io,8)?!=0x4c03 || h(&mem.io,10)?!=0x4e02
+            // WIN1 frames the quantity window (it owns A/B) and the item Info window.
+            || (h(&mem.io,0)?&0x4f07!=0x0f00 && !(h(&mem.io,0)?&0x0f07==0x0f00 && crate::ppu::shop_info_open(mem)))
+            || h(&mem.io,8)?!=0x4c03 || h(&mem.io,10)?!=0x4e02
             || h(&mem.io,12)?!=0x0b08 || h(&mem.io,14)?!=0x0a08 {return None;}
         let mut found=None;
         for cursor in (0x20..mem.ewram.len()-0x20).step_by(4) {
@@ -531,6 +535,8 @@ impl State {
         }
         Self {
             shop:crate::ffta_shop_mouse::State::new(rom,ffta_rom::version(rom).unwrap()),
+            graph:crate::ffta_graph_menu::State::new(rom,ffta_rom::version(rom).unwrap()),
+            rows:crate::ffta_row_list::State::new(rom,ffta_rom::version(rom).unwrap()),
             profile: Some(p),
             world_profile: world_profile(rom,ffta_rom::version(rom).unwrap()),
             menu_profile: MenuProfile::new(rom, ffta_rom::version(rom).unwrap()),
@@ -567,7 +573,7 @@ impl State {
     }
     pub fn interprets(&self, pc: u32) -> bool {
         self.enabled
-            && (self.shop.interprets(pc) || (self.request.is_some_and(|r| r.committed.is_none())
+            && (self.shop.interprets(pc) || self.graph.interprets(pc) || self.rows.interprets(pc) || (self.request.is_some_and(|r| r.committed.is_none())
                 && self.profile.is_some_and(|p| (p.start..p.end).contains(&pc)))
                 || (self.menu_request.is_some()
                     && self.menu_profile.is_some_and(|p| (p.start..p.end).contains(&pc)))
@@ -808,6 +814,8 @@ pub fn world_select(mem:&mut MemMap,x:f32,y:f32,confirm:bool)->bool {
 }
 /// Plain A/B also work in dialogue, forecasts and unsupported menu contexts.
 pub fn press(mem:&mut MemMap,key:u16)->bool {press_sequence(mem,&[key])}
+/// A synthetic press or a menu jump is under way.
+pub fn busy(mem:&MemMap)->bool {!idle(mem) || mem.ffta_battle_mouse.menu_request.is_some()}
 /// No queued or held synthetic press.
 pub fn idle(mem:&MemMap)->bool {
     let s=&mem.ffta_battle_mouse;
@@ -839,6 +847,8 @@ pub fn facing_center(mem:&MemMap)->Option<[f32;2]> {
 pub fn keys(mem: &mut MemMap, physical: u16) -> u16 {
     if physical != RELEASED {
         mem.ffta_battle_mouse.cancel();
+        mem.ffta_battle_mouse.graph.cancel();
+        mem.ffta_battle_mouse.rows.cancel();
         return physical;
     }
     if !mem.ffta_battle_mouse.enabled {
@@ -1056,6 +1066,8 @@ impl Machine {
             return;
         }
         self.ffta_world_mouse_entry();
+        self.ffta_graph_menu_entry();
+        self.ffta_row_list_entry();
         crate::ffta_shop_mouse::entry(self);
         self.ffta_shop_cursor_entry();
         self.ffta_pub_cursor_entry();

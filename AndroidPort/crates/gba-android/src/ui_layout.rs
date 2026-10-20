@@ -31,7 +31,9 @@ impl Band {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Dock { Top, Bottom, Thumb,
     /// Moved like the thumb block with these bounds (a menu sliding in or out).
-    Follow([i32; 4]) }
+    Follow([i32; 4]),
+    /// This many native rows under the frame's top edge, at its native x.
+    TopAt(i32) }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
@@ -101,6 +103,7 @@ impl Layout {
             let (pw, ph) = ((r[2] - r[0]) as f32 * k, (r[3] - r[1]) as f32 * k);
             let (left, top) = match dock {
                 Dock::Top => (canvas_left + (r[0] + 120) as f32 * k, y + r[1] as f32 * k),
+                Dock::TopAt(row) => (canvas_left + (r[0] + 120) as f32 * k, y + row as f32 * k),
                 Dock::Bottom => (canvas_left + (r[0] + 120) as f32 * k, y + h - (160 - r[1]) as f32 * k),
                 Dock::Thumb => thumb(r),
                 Dock::Follow(m) => {

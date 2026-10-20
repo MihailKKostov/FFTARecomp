@@ -107,6 +107,13 @@ pub struct DialogueState {
     pub docked: bool,
     /// Native x extent (left, right) of the town menu window once fully shown.
     pub town_menu_x: Option<(i32, i32)>,
+    /// The shop's item Info window this frame (WIN1, native rect). It is
+    /// captured on its own (`extra`, PanelKind::Info); the shop list it covers
+    /// is drawn from `shop_maps` instead.
+    pub shop_info: Option<[i32;4]>,
+    /// BG2 and BG3 maps (32x32 entries each) of the last shop frame without
+    /// the Info window: the game writes the window over the list's map.
+    pub(crate) shop_maps: Option<Vec<u16>>,
 }
 
 pub fn enabled() -> bool {
@@ -284,6 +291,8 @@ pub enum PanelKind {
     Stats,
     Actions,
     Notice,
+    /// The shop's item Info window (`DialogueState::shop_info`).
+    Info,
 }
 #[derive(Default)]
 pub struct Panel {

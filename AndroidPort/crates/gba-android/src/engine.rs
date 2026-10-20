@@ -26,6 +26,10 @@ pub(crate) struct PartyGoal {
     /// Party menus: the native row the menu cursor (`party_cursor`) must
     /// reach instead of a unit (it moves with Up/Down; A once it rests).
     pub row:Option<i32>,
+    /// Graph menus (gba-core ffta_graph_menu): the entry jumped to; A once it is selected.
+    pub graph:Option<u8>,
+    /// Text lists (gba-core ffta_row_list): the list and the visible row jumped to.
+    pub list:Option<(usize,u8)>,
 }
 
 /// The shop's Buy/Sell list cursor: the menu pointer at the list's left edge.
@@ -79,6 +83,14 @@ pub struct Engine {
     /// Buttons drawn into the game picture this frame (game_buttons.rs) and
     /// their screen rectangles.
     pub buttons: Vec<(crate::game_buttons::Button,[f32;4])>,
+    /// Touch-only shops show the item Info window throughout (a saved setting,
+    /// `<save>.prefs`), and when the game last had it toggled for that.
+    pub shop_info: bool,
+    shop_info_pressed: u64,
+    /// Frames the shop list has been shown with the Info window closed.
+    shop_list_shown: u32,
+    /// The frame keeps a row under its top for setting buttons.
+    pub(crate) top_row: bool,
     /// HUD brightness of the previous frame and how many frames it has been
     /// unchanged: the game fades the world map by rewriting the palette.
     hud_luma: (u64,u32),
@@ -172,8 +184,9 @@ impl Engine {
     }
     /// Touch-only portrait buttons of this scene, in the bottom HUD row:
     /// world map Menu (Start; B closes an open menu, then it is highlighted),
-    /// Party screens Return (B), town scenes Return and, while the shop shows
-    /// its "R Info" hint (OAM tiles 0x2d4-0x2d9), Info (R).
+    /// Party screens Return (B), town lists Return, shop lists Buy/Sell and,
+    /// while the shop offers its "R Info" (OAM tiles 0x2d4-0x2d9), the Info
+    /// setting at the top right.
     /// A town scene (shop, pub, prison...) with the game-style button row.
     pub(crate) fn town_buttons(&self)->bool{
         let bus=&self.machine.bus;
@@ -184,7 +197,7 @@ impl Engine {
         use crate::game_buttons::row;
         let bus=&self.machine.bus;
         if !self.touch_enabled || !bus.ffta_dialogue.docked || self.padded || !crate::game_buttons::available(&bus.rom) {return Vec::new();}
-        let (start,back,info)=(0x3f7,0x3fd,0x2ff);
+        let (start,back)=(0x3f7,0x3fd);
         if bus.world_hud.map_frame {
             let open=bus.world_hud.menu;
             let w=crate::game_buttons::width(&bus.rom,"Menu");
@@ -198,14 +211,48 @@ impl Engine {
             let half=|o:&[u8],i:usize|u16::from_le_bytes([o[i],o[i+1]]);
             let hint=bus.oam.chunks_exact(8).any(|o|half(o,0)&0x300!=0x200 && (0x2d4..=0x2d9).contains(&(half(o,4)&1023)) && (half(o,4)>>10)&3==0);
             if shop_list_cursor(bus).is_some() {
-                // Shop lists: choose the selected item (and confirm its quantity), its info, back.
+                // Shop lists: choose the selected item (and confirm its quantity), back;
+                // at the top right the Info setting (key 0) while the game offers its Info.
                 let choose=if self.shop_choice==(3,1) {"Sell"} else {"Buy"};
-                let items=[(choose,0x3fe,false),("Info",info,false),("Return",back,false)];
-                return if hint {row(&bus.rom,236,&items)} else {row(&bus.rom,236,&[items[0],items[2]])};
+                let mut buttons=row(&bus.rom,236,&[(choose,0x3fe,false),("Return",back,false)]);
+                if hint || gba_core::ppu::shop_info_open(bus) {
+                    buttons.extend(row(&bus.rom,236,&[("Info",0,self.shop_info)]).into_iter().map(|b|crate::game_buttons::Button{top:true,..b}));
+                }
+                return buttons;
             }
             return row(&bus.rom,236,&[("Return",back,false)]);
         }
         Vec::new()
+    }
+    /// Keeps the game's item Info window open or closed, as set, wherever the
+    /// shop offers it (its own R toggle, at most every 30 frames). It opens
+    /// once the list has settled and been kept to be drawn under it.
+    fn sync_shop_info(&mut self){
+        let bus=&mut self.machine.bus;
+        let offered=self.buttons.iter().any(|(b,_)|b.top && b.key==0);
+        let open=gba_core::ppu::shop_info_open(bus);
+        self.shop_list_shown=if offered && !open {self.shop_list_shown.saturating_add(1)} else {0};
+        if !offered || battle::busy(bus) || self.party_goal.is_some() {return;}
+        if open==self.shop_info || bus.frames<self.shop_info_pressed+30 {return;}
+        if !open && (self.shop_list_shown<10 || !gba_core::ppu::shop_list_kept(bus)) {return;}
+        battle::press(bus,0x2ff);
+        self.shop_info_pressed=bus.frames;
+    }
+    /// The Info setting button was tapped.
+    pub(crate) fn toggle_shop_info(&mut self){
+        self.shop_info=!self.shop_info;
+        self.save_prefs();
+    }
+    fn prefs_path(&self)->Option<PathBuf>{self.save_path.as_ref().map(|p|p.with_extension("prefs"))}
+    /// Settings kept next to the save: `shop_info=1`.
+    pub fn load_prefs(&mut self){
+        let text=self.prefs_path().and_then(|p|std::fs::read_to_string(p).ok()).unwrap_or_default();
+        self.shop_info=text.lines().any(|l|l.trim()=="shop_info=1");
+    }
+    fn save_prefs(&self){
+        if let Some(path)=self.prefs_path() {
+            if let Err(e)=write_atomic(&path,format!("shop_info={}\n",self.shop_info as u8).as_bytes()) {status(format!("Settings not saved: {e}"));}
+        }
     }
     /// Moves the game's unit selection (EWRAM 0xfd3e) to a tapped unit with
     /// its own Left/Right, one press at a time: the cursor and the unit screen
@@ -217,8 +264,35 @@ impl Engine {
         let bus=&mut self.machine.bus;
         if bus.frames>goal.deadline || (goal.row.is_none() && !bus.menu_screen.frame) {self.party_goal=None;return;}
         if !battle::idle(bus) {return;}
+        if let Some(target)=goal.graph {
+            // The jump is made by the game's own routine; A once it has settled.
+            if gba_core::ffta_graph_menu::pending(bus) {return;}
+            let Some(menu)=gba_core::ffta_graph_menu::GraphMenu::read(bus) else {self.party_goal=None;return};
+            if menu.selected!=target {self.party_goal=None;return;}
+            goal.still+=1;
+            self.party_goal=Some(goal);
+            if goal.still<4 {return;}
+            if goal.confirm {battle::press(bus,0x3fe);}
+            self.party_goal=None;
+            return;
+        }
+        if let Some((list,target))=goal.list {
+            // The list's own routine jumps to the row; lists it does not move step.
+            if gba_core::ffta_row_list::pending(bus) {return;}
+            let Some(shown)=gba_core::ffta_row_list::RowList::all(bus).into_iter().find(|l|l.list==list) else {self.party_goal=None;return};
+            goal.still=if goal.cursor[0]==shown.row {goal.still+1} else {0};
+            goal.cursor[0]=shown.row;
+            self.party_goal=Some(goal);
+            if goal.still<4 {return;}
+            if shown.row==target {if goal.confirm {battle::press(bus,0x3fe);} self.party_goal=None;return;}
+            battle::press(bus,if target>shown.row {0x37f} else {0x3bf});
+            goal.still=0;
+            self.party_goal=Some(goal);
+            return;
+        }
         if let Some(row)=goal.row {
-            // Menu rows: Up/Down until the cursor rests on the row, then A.
+            // Menu rows: Up/Down until the cursor rests on the row, then A
+            // (after a jump made by the list's own routine, usually none).
             let Some((_,y))=party_cursor(bus) else {self.party_goal=None;return};
             goal.still=if goal.cursor[0]==y as u8 {goal.still+1} else {0};
             goal.cursor[0]=y as u8;
@@ -299,7 +373,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -455,14 +529,16 @@ impl Engine {
         self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock,&mut self.party_cache,&mut self.party_scroll)}else{None};
         let buttons=self.scene_buttons();
         let s=rect[3]/mem::render_height() as f32;
-        let offset=dock.1-160;
+        self.top_row=buttons.iter().any(|b|b.top);
         self.buttons=buttons.into_iter().map(|button|{
+            let offset=if button.top {dock.0+1-crate::game_buttons::ROW.0} else {dock.1-160};
             crate::game_buttons::draw(&self.machine.bus,&mut self.pixels,mem::render_width(),mem::render_height(),mem::extra(),offset,&button);
             let (y0,y1)=crate::game_buttons::ROW;
             let screen=[rect[0]+(mem::extra() as i32+button.x.0) as f32*s,rect[1]+(offset+y0) as f32*s,
                 (button.x.1-button.x.0) as f32*s,(y1-y0) as f32*s];
             (button,screen)
         }).collect();
+        self.sync_shop_info();
         // The app's own Menu button stands in only where the game's resources are missing.
         self.menu_button=if self.buttons.is_empty() {self.map_menu_button()} else {None};
         let state=&self.machine.bus.ffta_dialogue;

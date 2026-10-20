@@ -50,6 +50,7 @@ pub unsafe extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaLoadRom(
         }
         loaded.note_battery();
         loaded.save_path = Some(save);
+        loaded.load_prefs();
         loaded.cache_dir = loaded.save_path.as_ref().and_then(|path|path.parent()).map(|path|path.join("compiled"));
         *ENGINE.lock().map_err(|_|"Engine mutex poisoned")? = Some(loaded);
         KEYS.store(0x3ff,Ordering::Relaxed);

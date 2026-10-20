@@ -303,6 +303,7 @@ fn main() -> Result<(), String> {
     let mut engine = Engine::new(rom);
     if let Some(path) = &sav { engine.machine.bus.load_save_data(&std::fs::read(path).map_err(|e| format!("read save: {e}"))?); }
     engine.save_path = save_out;
+    engine.load_prefs();
     engine.note_battery();
     if resume { eprintln!("resumed: {:?}", engine.resume()); }
     engine.skip_hidden_frames = skip;

@@ -126,6 +126,44 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.38-android-preview
+
+**Taps jump straight to their entry, everywhere they used to step.** The
+game moves its cursors one entry per press; a tap now makes one press and
+has the game's own cursor routine land on the tapped entry, so its sound,
+highlight, stats and redraw are the game's own for that entry (measured:
+the target is selected 4 frames after the tap).
+- Cursor graphs (gba-core `ffta_graph_menu.rs`, USA routine 0x08088fec,
+  called every frame with the menu): the unit MENU, the EQUIP slots and
+  the ability slots. Entries list their cursor position and Left/Right/
+  Up/Down neighbours; where the routine stores the neighbour it moved to,
+  the tapped entry is stored. Entries are placed on the screen through the
+  visible cursor.
+- Text lists of the Party screens (`ffta_row_list.rs`): items (0x08082254)
+  and abilities (0x080845b4) move their cursor to a visible row through one
+  routine, entered with the tapped row. The lists are read from the game's
+  list manager and windows (IWRAM 0x2818, 0x9e0), which also places lists
+  without a pointer (the ability sets show only a highlighted row).
+- Shop lists use the existing direct selection (`MenuScene::shop_inventory`,
+  also while the Info window is open); a tap on the selected item buys.
+- Stepping remains only as a fallback where no routine applies.
+
+**Shop Info at the top, as a setting.** An Info button at the top right of
+shop lists (in the game's button style, highlighted while on) turns item
+Info on or off for every item; it is saved next to the save (`ffta.prefs`)
+and applies whenever a shop list is shown. While on, the game's own Info
+(R) is kept open: its window (WIN1, BG3 frame corners 0xb00d/0xb00e,
+104x144 at 128,8) is captured as its own panel and docked under the
+button, down to its last text. The game writes the window over the list's
+map, so the list under it is drawn from the BG2/BG3 maps kept while the
+window was closed (list rows take their live highlight palette), prices
+included. The Move/Jump/Evade panel, whose digits the game removes while
+Info is open, stays hidden. Return closes Info before going back. Only in
+portrait docking; landscape is unchanged.
+
+**Party grid at the top.** The bar and units start at the top of the frame
+(under the touch buttons) instead of being centred.
+
 ## 0.37-android-preview
 
 **Return only where the menu has no Leave.** Town scenes show no button row on

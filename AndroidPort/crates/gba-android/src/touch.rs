@@ -82,6 +82,16 @@ pub fn town_menu(state:&dialogue::DialogueState)->Option<[i32;4]>{
         Dock::Thumb=>Some(b),Dock::Follow(m)=>Some(m),_=>None})
 }
 
+/// Rows of the Info window (`bounds`, its 8-row edges included) down to its
+/// last text, in whole tiles with a margin, without its bottom edge.
+fn info_rows(pixels:&[dialogue::UiPixel],[l,t,r,b]:[i32;4])->i32{
+    let at=|x:i32,y:i32|pixels.get((y*dialogue::LAYER_WIDTH as i32+x+dialogue::LAYER_INSET) as usize).copied();
+    let body=at(l+10,t+10).map(|p|p.color);
+    let text=(t+8..b-8).rev().find(|&y|(l+8..r-8).any(|x|at(x,y).is_some_and(|p|p.visible() && Some(p.color)!=body)));
+    let last=text.map_or(t+24,|y|y+1).max(t+24);
+    ((last+4-t+7)/8*8).min(b-8-t)
+}
+
 /// `menu`: the last town menu block (`town_menu`) while its scene lasts.
 pub fn pieces(bus:&MemMap,band:Band,index:usize,menu:Option<[i32;4]>)->Vec<Layout>{
     let state=&bus.ffta_dialogue;
@@ -92,6 +102,14 @@ pub fn pieces(bus:&MemMap,band:Band,index:usize,menu:Option<[i32;4]>)->Vec<Layou
         let blocks:Vec<_>=canvas_blocks(&state.pixels).into_iter().filter(|(b,_)|b[2]>0 && b[0]<240).collect();
         let placed:Vec<_>=blocks.iter().map(|&(b,c)|(b,dock_for(state,menu,b,c))).collect();
         return Layout::docked(band,state.style.scale,&placed);
+    }
+    if docked && index==1 && state.shop_layout && state.extra.kind==PanelKind::Info {
+        // The shop's item Info window at the top: its rows down to the last
+        // text, then its bottom edge (the rest is empty window).
+        if let Some([l,t,r,b])=state.extra.bounds {
+            let rows=info_rows(&state.extra.pixels,[l,t,r,b]);
+            return Layout::docked(band,state.style.scale,&[([l,t,r,t+rows],Dock::TopAt(0)),([l,b-8,r,b],Dock::TopAt(rows))]);
+        }
     }
     if docked && index==1 && state.town_layout && state.extra.kind==PanelKind::Actions && state.extra.active() {
         if let Some(b)=dialogue::pixel_bounds(&state.extra.pixels) {
@@ -167,9 +185,11 @@ impl Engine {
     pub fn ui_band(&self)->Band{
         match self.ui_dock {
             Some((top,bottom)) if self.expanded => {
-                // Town scenes keep the bottom HUD row free for the game-style buttons.
-                let row=if self.town_buttons() {crate::game_buttons::ROW_HEIGHT as f32*self.world_rect[2]/mem::render_width() as f32} else {0.};
-                Band::docked(self.ui_window,self.ui_base,top,bottom-row)
+                // Town scenes keep the bottom HUD row free for the game-style
+                // buttons, and the top row for setting buttons when shown.
+                let row=crate::game_buttons::ROW_HEIGHT as f32*self.world_rect[2]/mem::render_width() as f32;
+                let town=self.town_buttons();
+                Band::docked(self.ui_window,self.ui_base,top+if town && self.top_row {row} else {0.},bottom-if town {row} else {0.})
             }
             _ => Band::letterbox(self.ui_window,self.ui_base),
         }
@@ -194,7 +214,10 @@ impl Engine {
         if let Some(key)=self.buttons.iter().find(|(_,[bx,by,bw,bh])|px>=*bx && px<bx+bw && py>=*by && py<by+bh).map(|(b,_)|b.key) {
             self.mouse.cancel();
             self.party_goal=None;
-            battle::press(&mut self.machine.bus,key);
+            if key==0 {self.toggle_shop_info();}
+            // B only closes the item Info window: close it, then go back.
+            else if key==0x3fd && gba_core::ppu::shop_info_open(&self.machine.bus) {battle::press_sequence(&mut self.machine.bus,&[0x2ff,0x3fd]);}
+            else {battle::press(&mut self.machine.bus,key);}
             return;
         }
         let band=self.ui_band();
@@ -257,6 +280,26 @@ impl Engine {
     /// chooses with A, like the other touch menus. Returns false (the caller
     /// falls back) when there is no cursor.
     fn party_menu_tap(&mut self,x:f32,y:f32)->bool{
+        // Menus moved by the game's cursor graph (MENU, EQUIP): straight to the entry, then A.
+        if let (Some(menu),Some((cx,cy)))=(gba_core::ffta_graph_menu::GraphMenu::read(&self.machine.bus),crate::engine::party_cursor(&self.machine.bus)) {
+            // Entry positions are the menu's own; the visible cursor places them on screen.
+            let at=menu.entry(&self.machine.bus,menu.selected);
+            let Some(target)=menu.hit(&self.machine.bus,x-(cx-at.x) as f32,y-(cy-at.y) as f32) else {return true};
+            self.mouse.cancel();
+            if gba_core::ffta_graph_menu::select(&mut self.machine.bus,target) {
+                self.party_goal=Some(crate::engine::PartyGoal{target:0,confirm:true,deadline:self.machine.bus.frames+120,
+                    pressed:None,cursor:[0;4],still:0,row:None,graph:Some(target),list:None});
+                return true;
+            }
+        }
+        // The game's text lists (items, abilities; some show no pointer): straight to the row, then A.
+        if let Some((list,row))=gba_core::ffta_row_list::RowList::at(&self.machine.bus,x,y) {
+            self.mouse.cancel();
+            gba_core::ffta_row_list::select(&mut self.machine.bus,row as i32-list.row as i32);
+            self.party_goal=Some(crate::engine::PartyGoal{target:0,confirm:true,deadline:self.machine.bus.frames+300,
+                pressed:None,cursor:[list.row,0,0,0],still:0,row:None,graph:None,list:Some((list.list,row))});
+            return true;
+        }
         let bus=&self.machine.bus;
         let Some((cx,cy))=crate::engine::party_cursor(bus) else {return false};
         if x<(cx-8) as f32 || x>(cx+120) as f32 {return true;}
@@ -271,7 +314,7 @@ impl Engine {
         if !text {return true;}
         self.mouse.cancel();
         self.party_goal=Some(crate::engine::PartyGoal{target:0,confirm:true,deadline:self.machine.bus.frames+600,
-            pressed:None,cursor:[0;4],still:0,row:Some(row+4),});
+            pressed:None,cursor:[0;4],still:0,row:Some(row+4),graph:None,list:None});
         true
     }
     /// Shop Buy and Sell lists: a tap on an item selects it (the game's cursor
@@ -281,6 +324,15 @@ impl Engine {
     fn shop_list_tap(&mut self,x:f32,y:f32)->bool{
         let bus=&self.machine.bus;
         let Some((cx,cy))=crate::engine::shop_list_cursor(bus) else {return false};
+        // The game's shop list (its cursor routine jumps straight to the item).
+        if let Some(scene)=battle::MenuScene::read(bus) {
+            if let Some(target)=scene.hit(x,y) {
+                self.mouse.cancel();
+                if target==scene.selected {battle::press(&mut self.machine.bus,0x3fe);}
+                else {battle::menu_select(&mut self.machine.bus,target,false);}
+                return true;
+            }
+        }
         if x<(cx-8) as f32 || x>(cx+232) as f32 {return false;}
         let steps=((y-(cy-4) as f32)/16.).floor() as i32;
         let row=cy+steps*16;
@@ -294,7 +346,7 @@ impl Engine {
         self.mouse.cancel();
         if steps==0 {battle::press(&mut self.machine.bus,0x3fe);return true;}
         self.party_goal=Some(crate::engine::PartyGoal{target:0,confirm:false,deadline:self.machine.bus.frames+600,
-            pressed:None,cursor:[0;4],still:0,row:Some(row)});
+            pressed:None,cursor:[0;4],still:0,row:Some(row),graph:None,list:None});
         true
     }
     /// A tap on a unit in the party picture: on the roster the game's cursor
@@ -309,7 +361,7 @@ impl Engine {
             _ => return,
         };
         self.mouse.cancel();
-        self.party_goal=Some(crate::engine::PartyGoal{target,confirm,deadline:self.machine.bus.frames+600,pressed:None,cursor:[0;4],still:0,row:None});
+        self.party_goal=Some(crate::engine::PartyGoal{target,confirm,deadline:self.machine.bus.frames+600,pressed:None,cursor:[0;4],still:0,row:None,graph:None,list:None});
     }
     pub fn export_ui(&self,packed:&mut [u8],params:&mut [f32],background:&mut [i32]){
         // Slots of 9 floats: rect, clip, layer + 2 when it blends over the stats background.

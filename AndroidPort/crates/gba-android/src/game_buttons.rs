@@ -8,8 +8,9 @@
 //! compressed archive; the five 8x8 tiles below are byte-for-byte copies of
 //! them as the game loads them into BG VRAM (measured on the world map).
 //!
-//! All buttons share one row: the bottom HUD row (native rows 133-159), where
-//! the world map shows Clan Funds and the date and town scenes Clan Funds.
+//! Buttons share one row: the bottom HUD row (native rows 133-159), where
+//! the world map shows Clan Funds and the date and town scenes Clan Funds;
+//! settings sit in a row under the top of the frame.
 use gba_core::mem::MemMap;
 
 /// Menu font: 16x16 cells of four 4-bpp tiles (left column top, bottom, then
@@ -94,8 +95,10 @@ pub struct Button {
     pub label: &'static str,
     /// KEYINPUT mask pressed on a tap.
     pub key: u16,
-    /// Drawn highlighted (its menu is open).
+    /// Drawn highlighted (its menu is open, or the setting it toggles is on).
     pub active: bool,
+    /// In the row under the top of the frame instead of the bottom HUD row.
+    pub top: bool,
 }
 
 /// Buttons laid out right-aligned ending at native x `right`, `gap` apart.
@@ -103,7 +106,7 @@ pub fn row(rom: &[u8], right: i32, items: &[(&'static str, u16, bool)]) -> Vec<B
     let mut x1 = right;
     let mut out: Vec<Button> = items.iter().rev().map(|&(label, key, active)| {
         let x0 = x1 - width(rom, label);
-        let button = Button { x: (x0, x1), label, key, active };
+        let button = Button { x: (x0, x1), label, key, active, top: false };
         x1 = x0 - 4;
         button
     }).collect();

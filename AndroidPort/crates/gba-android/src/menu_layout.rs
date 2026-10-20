@@ -107,8 +107,9 @@ impl PartyCache {
 
 /// Upper-half party grid in native-relative rows (`top`..`bottom`): the
 /// roster as the game draws it (its hint bar, then four units to a row in its
-/// zig-zag: rows 40 apart, every other row 24 further left), centred in the
-/// half. A party taller than the half scrolls (`scroll` rows).
+/// zig-zag: rows 40 apart, every other row 24 further left), from the top of
+/// the half (below the touch buttons). A party taller than the half scrolls
+/// (`scroll` rows).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PartyGrid { pub top: i32, pub bottom: i32, pub count: usize, pub scroll: i32 }
 
@@ -120,12 +121,8 @@ const BAR_GAP: i32 = 2;
 impl PartyGrid {
     fn rows(&self) -> i32 { self.count.div_ceil(COLUMNS).max(1) as i32 }
     fn content(&self) -> i32 { (self.rows() - 1) * PITCH_Y + CELL_H }
-    /// The bar's first row: the bar and the units centred in the half, or at
-    /// its top when they do not fit.
-    pub fn bar(&self) -> i32 {
-        let block = BAR_ROWS + BAR_GAP + self.content();
-        self.top + ((self.bottom - self.top - block) / 2).max(0)
-    }
+    /// The bar's first row: the top of the half.
+    pub fn bar(&self) -> i32 { self.top }
     /// Rows where units are shown (below the bar).
     pub fn area(&self) -> (i32, i32) { (self.bar() + BAR_ROWS, self.bottom) }
     pub fn max_scroll(&self) -> i32 { let (a, b) = self.area(); (BAR_GAP + self.content() - (b - a)).max(0) }
@@ -237,7 +234,7 @@ pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut O
     // Upper half: the party grid, the selection under the unit selected now.
     let all = (i32::MIN / 2, i32::MAX / 2);
     let grid = cache.as_ref().filter(|c| c.count() > 0).map(|kept| {
-        let mut grid = PartyGrid { top: top + 8, bottom: (top + bottom) / 2, count: kept.count(), scroll: 0 };
+        let mut grid = PartyGrid { top: top + 4, bottom: (top + bottom) / 2, count: kept.count(), scroll: 0 };
         *scroll = (*scroll).clamp(0, grid.max_scroll());
         grid.scroll = *scroll;
         let area = grid.area();
@@ -283,10 +280,9 @@ mod tests {
         // The roster's own spacing: 48 across, rows 40 apart, the second row 24 to the left.
         assert_eq!((cells[1][0] - cells[0][0], cells[1][1] - cells[0][1]), (48, 0));
         assert_eq!((cells[4][0] - cells[0][0], cells[4][1] - cells[0][1]), (-24, 40));
-        // Bar and units centred in the half, the bar just above the units.
-        let (bar, end) = (grid.bar(), cells[5][1] + CELL_H);
-        assert!(((bar - grid.top) - (grid.bottom - end)).abs() <= 1);
-        assert_eq!(cells[0][1], bar + BAR_ROWS + BAR_GAP);
+        // Bar at the top of the half, the units just below it.
+        assert_eq!(grid.bar(), grid.top);
+        assert_eq!(cells[0][1], grid.top + BAR_ROWS + BAR_GAP);
         assert_eq!(grid.max_scroll(), 0);
         assert_eq!(grid.unit_at((cells[4][0] + 16) as f32, (cells[4][1] + 20) as f32), Some(4));
         // Where cells overlap (row 2 under row 1), the nearer unit is chosen.
