@@ -7,7 +7,11 @@ struct Profile { start:u32,commit:u32,end:u32,inventory:u32,handlers:[u32;2],
 #[derive(Clone,Copy)]
 struct Request { base:usize,slot:u8,source:u8,ids:[u8;6],count:u8,deadline:u64,committed:Option<u64> }
 #[derive(Default)]
-pub(crate) struct State { profile:Option<Profile>,request:Option<Request>,deferred:Option<(f32,f32,bool)> }
+pub(crate) struct State { profile:Option<Profile>,request:Option<Request>,deferred:Option<(f32,f32,bool)>,
+    /// A quantity being set (`set_quantity`); kept through the menu cancels, ended by physical input.
+    pub(crate) quantity:Option<QuantityRequest> }
+#[derive(Clone,Copy)]
+pub(crate) struct QuantityRequest { target:u8, deadline:u64, committed:bool }
 impl State {
     pub(crate) fn new(rom:&[u8],version:Version)->Self {
         let start=match version {Version::Europe=>0x71490,Version::Usa=>0x6efa8};
@@ -19,12 +23,13 @@ impl State {
             end:0x0800003c+start as u32,inventory:0x08000001+inventory as u32,
             handlers:match version {Version::Usa=>[0x08069659,0x0806b6d1],Version::Europe=>[0x0806bb0d,0x0806db7d]},
             menu:(version==Version::Usa && rom.get(0x68c10..0x68c18)==Some(&[0xf0,0xb5,0x4f,0x46,0x46,0x46,0xc0,0xb4])).then_some(0x08068c11)}),
-            request:None,deferred:None}
+            request:None,deferred:None,quantity:None}
     }
     pub(crate) fn cancel(&mut self) {self.request=None;self.deferred=None;}
     pub(crate) fn pending(&self)->bool {self.request.is_some()}
     pub(crate) fn interprets(&self,pc:u32)->bool {
-        self.request.is_some() && self.profile.is_some_and(|p|(p.start..p.end).contains(&pc))
+        (self.request.is_some() && self.profile.is_some_and(|p|(p.start..p.end).contains(&pc)))
+            || (self.quantity.is_some_and(|q|!q.committed) && (QUANTITY_CODE.0..QUANTITY_CODE.1).contains(&pc))
     }
 }
 fn half(b:&[u8],o:usize)->Option<u16>{Some(u16::from_le_bytes(b.get(o..o+2)?.try_into().ok()?))}
@@ -148,7 +153,73 @@ pub(crate) fn keys(mem:&mut MemMap)->Option<u16> {
     }
     Some(0x3ef) // wake the original Right branch once; its store receives the target
 }
+/// A shop list as shown: the list (EWRAM), its entries, the first shown, rows
+/// shown, the selected row; its first row's native top-left and right edge;
+/// its category (id) and whether it is the Sell list.
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub struct ShopList { pub list:usize, pub count:u16, pub first:u16, pub visible:u8, pub row:u8,
+    pub origin:[i32;2], pub right:i32, pub category:u8, pub sell:bool }
+pub fn shop_list(mem:&MemMap)->Option<ShopList> {
+    let Some(ShopPhase::List{sell})=phase(mem) else {return None};
+    let c=context(mem)?;
+    let scene=crate::ffta_battle_mouse::MenuScene::shop_inventory(mem)?;
+    let list=c.cursor-0x20;
+    if scene.base!=c.cursor {return None;}
+    let count=half(&mem.ewram,list+0x18)?;let first=half(&mem.ewram,list+0x1a)?;
+    let visible=*mem.ewram.get(list+0x16)?;let row=*mem.ewram.get(c.cursor+0x11)?;
+    if visible==0 || first as u32+row as u32>=count as u32 {return None;}
+    Some(ShopList{list,count,first,visible,row,origin:scene.origin,right:scene.right,category:c.ids[c.current as usize],sell})
+}
+/// Category tabs of the shown list: the current tab and how many.
+pub fn categories(mem:&MemMap)->Option<(u8,u8)> {let c=context(mem)?;(!c.overlay).then_some((c.current,c.count))}
+
+/// The quantity window (USA, shop manager +0x395c): the number at +0x79, the
+/// most allowed (stock, Clan Funds) at +0x7a, at +0x7c whether Up/Down move
+/// it by 10. Its Up and Down store the new number at 0x0802a7a4/0x0802a7e6
+/// (r0 the number, r6 its address), then keep it within 1 and the most.
+const QUANTITY:usize=0x395c;
+const QUANTITY_STORES:[u32;2]=[0x0802a7a4,0x0802a7e6];
+const QUANTITY_CODE:(u32,u32)=(0x0802a780,0x0802a7f4);
+fn quantity_address(mem:&MemMap)->Option<usize> {
+    let p=mem.ffta_battle_mouse.shop.profile?;p.menu?;
+    if mem.rom.get(0x2a7a0..0x2a7a6)!=Some(&[0x30,0x78,0x01,0x30,0x30,0x70]) || mem.rom.get(0x2a7e2..0x2a7e8)!=Some(&[0x30,0x78,0x01,0x38,0x30,0x70]) {return None;}
+    if !matches!(phase(mem),Some(ShopPhase::Quantity{..})) {return None;}
+    let manager=word(&mem.ewram,0xf428)?.checked_sub(0x02000000)? as usize;
+    Some(manager+QUANTITY+0x79)
+}
+/// The number being bought or sold and the most allowed, in the quantity window.
+pub fn quantity(mem:&MemMap)->Option<(u8,u8)> {
+    let a=quantity_address(mem)?;
+    let (value,most)=(*mem.ewram.get(a)?,*mem.ewram.get(a+1)?);
+    (value>=1 && value<=most && most<=99).then_some((value,most))
+}
+/// Sets the quantity with one Up or Down of the game's own window (its sound,
+/// redraw and limits). False outside the quantity window.
+pub fn set_quantity(mem:&mut MemMap,target:u8)->bool {
+    if !mem.ffta_battle_mouse.enabled {return false;}
+    let Some((value,most))=quantity(mem) else {return false};
+    let target=target.clamp(1,most);
+    if target==value {return true;}
+    if !crate::ffta_battle_mouse::press(mem,if target>value {0x3bf}else{0x37f}) {return false;}
+    mem.ffta_battle_mouse.shop.quantity=Some(QuantityRequest{target,deadline:mem.frames+20,committed:false});
+    true
+}
+/// A quantity set is waiting for the game's window.
+pub fn quantity_pending(mem:&MemMap)->bool {
+    mem.ffta_battle_mouse.shop.quantity.is_some_and(|q|!q.committed && mem.frames<=q.deadline)
+}
+fn quantity_entry(m:&mut Machine) {
+    let pc=m.cpu.regs[15];
+    if !QUANTITY_STORES.contains(&pc) {return;}
+    let Some(q)=m.bus.ffta_battle_mouse.shop.quantity.filter(|q|!q.committed) else {return};
+    if m.bus.frames>q.deadline {m.bus.ffta_battle_mouse.shop.quantity=None;return;}
+    let Some(a)=quantity_address(&m.bus) else {return};
+    if m.cpu.regs[6]!=0x02000000+a as u32 {return;}
+    m.cpu.regs[0]=q.target as u32;
+    m.bus.ffta_battle_mouse.shop.quantity=Some(QuantityRequest{committed:true,..q});
+}
 pub(crate) fn entry(m:&mut Machine) {
+    if m.bus.ffta_battle_mouse.enabled {quantity_entry(m);}
     let s=&m.bus.ffta_battle_mouse;
     let Some(p)=s.shop.profile.filter(|_|s.enabled)else{return;};
     if m.cpu.regs[15]!=p.commit {return;}

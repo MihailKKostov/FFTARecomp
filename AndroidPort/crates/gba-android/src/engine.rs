@@ -89,6 +89,13 @@ pub struct Engine {
     shop_info_pressed: u64,
     /// Frames the shop list has been shown with the Info window closed.
     shop_list_shown: u32,
+    /// The finger the engine follows (gestures.rs), the app's touch slop (px),
+    /// and the quantity arrow last stepped (until the frame).
+    pub(crate) gesture: Option<crate::gestures::Gesture>,
+    /// Touch-only shop lists that scroll and swipe (shop_scroll.rs).
+    pub(crate) shop_scroll: crate::shop_scroll::ShopScroll,
+    pub(crate) gesture_slop: f32,
+    pub(crate) quantity_flash: (bool,u64),
     /// The frame keeps a row under its top for setting buttons.
     pub(crate) top_row: bool,
     /// HUD brightness of the previous frame and how many frames it has been
@@ -255,7 +262,7 @@ impl Engine {
         let offered=self.buttons.iter().any(|(b,_)|b.top && b.key==0);
         let open=gba_core::ppu::shop_info_open(bus);
         self.shop_list_shown=if offered && !open {self.shop_list_shown.saturating_add(1)} else {0};
-        if !offered || battle::busy(bus) || self.party_goal.is_some() {return;}
+        if !offered || battle::busy(bus) || self.party_goal.is_some() || self.shop_scroll.busy() {return;}
         if open==self.shop_info || bus.frames<self.shop_info_pressed+30 {return;}
         if !open && (self.shop_list_shown<10 || !gba_core::ppu::shop_list_kept(bus)) {return;}
         battle::press(bus,0x2ff);
@@ -397,7 +404,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -479,40 +486,16 @@ impl Engine {
         self.pcm.begin(count.clamp(1,8),mode,
             self.cache_dir.as_deref().unwrap_or(&std::env::temp_dir()))?;
         let count=count.clamp(1,8);
+        self.drive_gestures();
+        self.shop_scroll_tick()?;
         for index in 0..count {
             self.drive_party_goal();
             let m = &mut *self.machine;
             m.bus.skip_render=self.skip_hidden_frames && index+1<count;
             let keys=self.mouse.keys(&mut m.bus,(KEYS.load(Ordering::Relaxed) as u16)&0x3ff);
             m.bus.keys = gba_core::ffta_battle_mouse::keys(&mut m.bus,keys);
-            m.bus.frame_ready = false;
-            let mut previous_end = u32::MAX;
-            for _ in 0..MAX_STEPS {
-                if m.bus.frame_ready { break; }
-                let pc = m.cpu.regs[15];
-                let native = if m.bus.halted
-                    || (pc == gba_core::machine::IRQ_RETURN_ADDR && m.cpu.mode() == gba_core::Mode::Irq)
-                    || (m.bus.irq_pending() && !m.cpu.flag(FLAG_I))
-                    || m.bus.ffta_battle_mouse.interprets(pc) || m.ffta_sprite_interpret(pc) { None }
-                    else { self.code.as_ref().and_then(|code| code.blocks.get(&(pc | m.cpu.thumb() as u32))).copied() };
-                if let Some(function) = native {
-                    if let Some(h) = m.bus.mp2k.as_deref() {
-                        let key = pc | m.cpu.thumb() as u32;
-                        if h.active && h.hook_match(key) { m.bus.mp2k_frame_hook(key); }
-                    }
-                    function(&gba_core::capi::RT_API, m as *mut _ as *mut _);
-                    self.native_blocks += 1;
-                    previous_end = u32::MAX;
-                } else {
-                    if self.adaptive && pc != previous_end && matches!(pc>>24,2|3|8) && self.missed.len()<2048
-                        && self.code.as_ref().is_some_and(|code|!code.blocks.contains_key(&(pc|m.cpu.thumb() as u32))) {
-                        self.missed.insert(pc | m.cpu.thumb() as u32);
-                    }
-                    previous_end = pc.wrapping_add(if m.cpu.thumb(){2}else{4});
-                    m.step(); self.fallback_steps += 1;
-                }
-            }
-            if !m.bus.frame_ready { return Err(format!("Frame stalled at PC {:08x}", m.cpu.regs[15])); }
+            self.step_frame()?;
+            let m = &mut *self.machine;
             self.pcm.feed(&m.bus.audio_buf);
             m.bus.audio_buf.clear();
         }
@@ -553,6 +536,8 @@ impl Engine {
             self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
         }
         self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock,&mut self.party_cache,&mut self.party_scroll)}else{None};
+        self.shop_scroll_present();
+        self.draw_quantity_arrows();
         let buttons=self.scene_buttons();
         let s=rect[3]/mem::render_height() as f32;
         self.top_row=buttons.iter().any(|b|b.top);
@@ -575,6 +560,40 @@ impl Engine {
         else if !state.shop_layout {self.town_menu=None;}
         self.frame_ns = start.elapsed().as_nanos() as u64;
         if self.adaptive && self.machine.bus.frames % 120 < count as u64 { self.start_compilation(); }
+        Ok(())
+    }
+    /// Runs the machine to the end of its frame with the keys already set
+    /// (compiled blocks where there are, the interpreter elsewhere).
+    pub(crate) fn step_frame(&mut self)->Result<(),String>{
+        let m = &mut *self.machine;
+        m.bus.frame_ready = false;
+        let mut previous_end = u32::MAX;
+        for _ in 0..MAX_STEPS {
+            if m.bus.frame_ready { break; }
+            let pc = m.cpu.regs[15];
+            let native = if m.bus.halted
+                || (pc == gba_core::machine::IRQ_RETURN_ADDR && m.cpu.mode() == gba_core::Mode::Irq)
+                || (m.bus.irq_pending() && !m.cpu.flag(FLAG_I))
+                || m.bus.ffta_battle_mouse.interprets(pc) || m.ffta_sprite_interpret(pc) { None }
+                else { self.code.as_ref().and_then(|code| code.blocks.get(&(pc | m.cpu.thumb() as u32))).copied() };
+            if let Some(function) = native {
+                if let Some(h) = m.bus.mp2k.as_deref() {
+                    let key = pc | m.cpu.thumb() as u32;
+                    if h.active && h.hook_match(key) { m.bus.mp2k_frame_hook(key); }
+                }
+                function(&gba_core::capi::RT_API, m as *mut _ as *mut _);
+                self.native_blocks += 1;
+                previous_end = u32::MAX;
+            } else {
+                if self.adaptive && pc != previous_end && matches!(pc>>24,2|3|8) && self.missed.len()<2048
+                    && self.code.as_ref().is_some_and(|code|!code.blocks.contains_key(&(pc|m.cpu.thumb() as u32))) {
+                    self.missed.insert(pc | m.cpu.thumb() as u32);
+                }
+                previous_end = pc.wrapping_add(if m.cpu.thumb(){2}else{4});
+                m.step(); self.fallback_steps += 1;
+            }
+        }
+        if !m.bus.frame_ready { return Err(format!("Frame stalled at PC {:08x}", m.cpu.regs[15])); }
         Ok(())
     }
     fn collect_compilation(&mut self) {

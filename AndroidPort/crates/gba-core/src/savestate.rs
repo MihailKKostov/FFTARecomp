@@ -54,21 +54,28 @@ fn digest(rom: &[u8]) -> u64 {
     rom.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
 }
 
-pub fn save(m: &Machine) -> Vec<u8> {
+pub fn save(m: &Machine) -> Vec<u8> { save_with(m, digest(&m.bus.rom)) }
+fn save_with(m: &Machine, rom: u64) -> Vec<u8> {
     let mut w = W(Vec::with_capacity(512 * 1024));
     w.0.extend_from_slice(MAGIC);
-    w.u64(digest(&m.bus.rom));
+    w.u64(rom);
     m.cpu.save_state(&mut w);
     m.bus.save_state(&mut w);
     w.0
 }
+/// An in-memory state for the host's short look-ahead runs (restored with
+/// `restore` into the same machine): no ROM digest, which costs milliseconds.
+pub fn snapshot(m: &Machine) -> Vec<u8> { save_with(m, 0) }
+pub fn restore(m: &mut Machine, data: &[u8]) -> Res<()> { load_with(m, data, None) }
 
 /// Restores a state taken with `save` for the same ROM. On error the machine
 /// is left as it was (the state is decoded into a copy first).
-pub fn load(m: &mut Machine, data: &[u8]) -> Res<()> {
+pub fn load(m: &mut Machine, data: &[u8]) -> Res<()> { let d = digest(&m.bus.rom); load_with(m, data, Some(d)) }
+fn load_with(m: &mut Machine, data: &[u8], rom: Option<u64>) -> Res<()> {
     if data.get(..8) != Some(&MAGIC[..]) { return Err("Not a resume state".into()); }
     let mut r = R { data, pos: 8 };
-    if r.u64()? != digest(&m.bus.rom) { return Err("Resume state belongs to another ROM".into()); }
+    let stored = r.u64()?;
+    if rom.is_some_and(|d| d != stored) { return Err("Resume state belongs to another ROM".into()); }
     let cpu = crate::cpu::Cpu::load_state(&mut r)?;
     // Everything is decoded before anything is assigned.
     let bus = crate::mem::BusState::load(&mut r)?;

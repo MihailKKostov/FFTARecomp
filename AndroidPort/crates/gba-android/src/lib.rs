@@ -8,6 +8,8 @@ mod audio;
 mod normal_audio;
 mod ui_layout;
 pub mod touch;
+mod gestures;
+mod shop_scroll;
 mod title_touch;
 mod world_map;
 pub mod game_buttons;

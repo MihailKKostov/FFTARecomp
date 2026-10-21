@@ -126,6 +126,48 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.41-android-preview
+
+**Quantity arrows.** In the quantity window the game's menu-font `<` and `>`
+(cells 92, 93 of its font) sit either side of the number, highlighted while
+used. A tap is one up or down; holding repeats after 18 frames, by 1, then
+5 (after 75 frames), then 10 (after 150). The number is set through the
+window's own Up/Down: where it stores the new number (USA 0x0802a7a4,
+0x0802a7e6; r6 its address, shop manager +0x395c +0x79), the wanted number
+is stored instead, and the game keeps it within 1 and its most (stock,
+Clan Funds at +0x7a) and plays its sound. Measured: taps 1, 2, 3, 2; held
+5, 9, then the most (10).
+
+**Shop lists scroll like phone lists** (`shop_scroll.rs`). The game shows
+four rows and scrolls a row per Up or Down. Every row is kept as the game
+draws it: a silent look-ahead run (machine snapshot, one list step of
+hidden frames per frame with item Info closed, restore; in-memory
+`savestate::snapshot`/`restore` without the ROM digest) collects the rows
+the game has not shown. The list is drawn from them at any offset, following
+the finger, flung with friction, rubber-banded past the ends, settled on a
+whole row. Settled, the game follows with its own Up/Down, a step every 4
+frames, its cursor sound (effect 0x6d at 0x08141540) skipped, the other
+panels (stats, Info) held as they were until it is there; its selection is
+kept when still shown, else it is the row its cursor reaches first. Buttons
+pressed meanwhile wait for it. With item Info open the list's rows come
+from what was kept (the Info window overwrites the list's map). Measured:
+a fling to the end of an 11-item list, the game there 40 frames later.
+The rows start a line above the game's row origin (glyph outlines).
+
+**Swipe between categories.** A sideways swipe on the list (once the finger
+clearly moves sideways, where there is a category that way) takes the rows
+with the finger; let go past a quarter of the list or fast, the game's own
+category change runs, the rows slide out and the new list slides in, the
+list window's fill behind; otherwise they spring back. Tapping a category
+still works.
+
+**Finger tracking.** The app sends a touch-only finger to the engine
+(`gbaPointerDown`/`Move`/`Up`) when the engine claims it on down: shop list
+rows, quantity arrows, the party grid. Lifted without moving it is a tap.
+
+**Fixes.** The shop list is recognised while WIN1 stays on after item Info
+closes (taps on items work again after turning Info off).
+
 ## 0.40-android-preview
 
 **Shop safety (audit phase 1).** The shop's state is read from the game

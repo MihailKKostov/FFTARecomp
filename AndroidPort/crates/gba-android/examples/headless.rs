@@ -23,7 +23,7 @@ use std::{path::PathBuf, sync::atomic::Ordering};
 
 const BUTTONS: [&str; 10] = ["A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L"];
 
-enum Event { Press(u16, u64), Tap(f32, f32, bool), Shot(String), Speed(u64), Dump(String), State(String), Checkpoint, Save, Poke(usize, Vec<u8>) }
+enum Event { Press(u16, u64), Tap(f32, f32, bool), Pointer(u8, f32, f32), Shot(String), Speed(u64), Dump(String), State(String), Checkpoint, Save, Poke(usize, Vec<u8>) }
 
 struct View { extra_x: usize, extra_y: usize, base_width: f32 }
 
@@ -60,6 +60,12 @@ fn parse_script(text: &str) -> Result<(Vec<(u64, Event)>, Option<u64>), String> 
                 }
                 let duration = parts.get(3).map_or(Ok(6), |d| d.parse()).map_err(|_| error())?;
                 events.push((frame, Event::Press(mask, duration)));
+            }
+            // down/move/up FRAME X Y: a finger the engine may follow (touch-only gestures).
+            "down" | "move" | "up" => {
+                let x = parts.get(2).and_then(|v| v.parse().ok()).ok_or_else(error)?;
+                let y = parts.get(3).and_then(|v| v.parse().ok()).ok_or_else(error)?;
+                events.push((frame, Event::Pointer(match parts[0] { "down" => 0, "move" => 1, _ => 2 }, x, y)));
             }
             "tap" => {
                 let x = parts.get(2).and_then(|v| v.parse().ok()).ok_or_else(error)?;
@@ -342,6 +348,10 @@ fn main() -> Result<(), String> {
             match &events[index].1 {
                 Event::Press(mask, duration) => held.push((*mask, frame + duration)),
                 Event::Tap(x, y, back) => engine.tap(*x, *y, *back),
+                // 32 dp at a 420 dpi phone, as GameSurface passes.
+                Event::Pointer(0, x, y) => { if !engine.pointer_down(*x, *y, 84.) { eprintln!("pointer down at ({x}, {y}) not followed"); } }
+                Event::Pointer(1, x, y) => engine.pointer_move(*x, *y),
+                Event::Pointer(_, x, y) => engine.pointer_up(*x, *y, false),
                 Event::Shot(name) => shots.push(name.clone()),
                 Event::Speed(_) => {}
                 Event::Dump(name) => dumps.push(name.clone()),

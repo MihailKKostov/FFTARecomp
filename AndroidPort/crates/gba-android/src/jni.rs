@@ -194,14 +194,20 @@ pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaCheckpoint(_: *m
     })
 }
 
-/// Touch-only drag: true when it starts on the scrollable party grid.
+/// Touch-only finger down (screen fractions, touch slop in px): true when the
+/// engine follows this finger (gestures.rs); its moves and lift then go to
+/// gbaPointerMove/gbaPointerUp instead of becoming a tap.
 #[no_mangle]
-pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaDragStarts(_: *mut JNIEnv,_:jobject,x:jfloat,y:jfloat)->jboolean{
-    ENGINE.lock().ok().and_then(|lock|lock.as_ref().map(|engine|engine.party_drag_starts(x,y) as jboolean)).unwrap_or(0)
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaPointerDown(_: *mut JNIEnv,_:jobject,x:jfloat,y:jfloat,slop:jfloat)->jboolean{
+    ENGINE.lock().ok().and_then(|mut lock|lock.as_mut().map(|engine|engine.pointer_down(x,y,slop) as jboolean)).unwrap_or(0)
 }
 #[no_mangle]
-pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaDrag(_: *mut JNIEnv,_:jobject,dy:jfloat){
-    if let Ok(mut lock)=ENGINE.lock(){if let Some(engine)=lock.as_mut(){engine.party_drag(dy);}}
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaPointerMove(_: *mut JNIEnv,_:jobject,x:jfloat,y:jfloat){
+    if let Ok(mut lock)=ENGINE.lock(){if let Some(engine)=lock.as_mut(){engine.pointer_move(x,y);}}
+}
+#[no_mangle]
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaPointerUp(_: *mut JNIEnv,_:jobject,x:jfloat,y:jfloat,cancel:jboolean){
+    if let Ok(mut lock)=ENGINE.lock(){if let Some(engine)=lock.as_mut(){engine.pointer_up(x,y,cancel!=0);}}
 }
 
 /// After loading the ROM: continue where the game was left (1), or start from the battery save (0).

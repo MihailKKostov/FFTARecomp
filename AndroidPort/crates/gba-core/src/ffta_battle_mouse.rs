@@ -41,6 +41,10 @@ pub struct State {
     menu_request: Option<MenuRequest>,
     menu_cache: std::sync::atomic::AtomicUsize,
     buttons: std::collections::VecDeque<u16>,
+    /// The queued presses are short (2 frames held, 2 released: one list step each).
+    quick: bool,
+    /// The game's cursor sound (effect 0x6d) is skipped (host-driven list steps).
+    pub silence_cursor: bool,
     button_key: u16,
     button_hold: u8,
     button_release: u8,
@@ -64,7 +68,7 @@ pub struct MenuScene {
     pub count: u8,
     pub selected: u8,
     pub origin: [i32; 2],
-    base: usize,
+    pub(crate) base: usize,
     binary: bool,
     horizontal: bool,
     split: i32,
@@ -337,8 +341,10 @@ impl MenuScene {
         let p=mem.ffta_battle_mouse.menu_profile?;
         let pc=if p.cursor==0x08018fc5 {0x71030}else{0x6eb48};
         if mem.rom.get(pc..pc+12)!=Some(&[0xf0,0xb5,0x87,0xb0,6,0x1c,0x11,0x4f,0x39,0x68,0x11,0x4a])
-            // WIN1 frames the quantity window (it owns A/B) and the item Info window.
-            || (h(&mem.io,0)?&0x4f07!=0x0f00 && !(h(&mem.io,0)?&0x0f07==0x0f00 && crate::ppu::shop_info_open(mem)))
+            // WIN1 frames the quantity window (it owns A/B) and the item Info
+            // window, and can stay on after Info closes: in the list it is fine.
+            || (h(&mem.io,0)?&0x4f07!=0x0f00 && !(h(&mem.io,0)?&0x0f07==0x0f00
+                && (crate::ppu::shop_info_open(mem) || matches!(crate::ffta_shop_mouse::phase(mem),Some(crate::ffta_shop_mouse::ShopPhase::List{..})))))
             || h(&mem.io,8)?!=0x4c03 || h(&mem.io,10)?!=0x4e02
             || h(&mem.io,12)?!=0x0b08 || h(&mem.io,14)?!=0x0a08 {return None;}
         let mut found=None;
@@ -573,7 +579,8 @@ impl State {
     }
     pub fn interprets(&self, pc: u32) -> bool {
         self.enabled
-            && (self.shop.interprets(pc) || self.graph.interprets(pc) || self.rows.interprets(pc) || (self.request.is_some_and(|r| r.committed.is_none())
+            && (self.shop.interprets(pc) || self.graph.interprets(pc) || self.rows.interprets(pc)
+                || (self.silence_cursor && pc==SOUND_EFFECT) || (self.request.is_some_and(|r| r.committed.is_none())
                 && self.profile.is_some_and(|p| (p.start..p.end).contains(&pc)))
                 || (self.menu_request.is_some()
                     && self.menu_profile.is_some_and(|p| (p.start..p.end).contains(&pc)))
@@ -814,6 +821,8 @@ pub fn world_select(mem:&mut MemMap,x:f32,y:f32,confirm:bool)->bool {
 }
 /// Plain A/B also work in dialogue, forecasts and unsupported menu contexts.
 pub fn press(mem:&mut MemMap,key:u16)->bool {press_sequence(mem,&[key])}
+/// The game's sound effect call (USA; r0 the effect).
+const SOUND_EFFECT:u32=0x08141540;
 /// A synthetic press or a menu jump is under way.
 pub fn busy(mem:&MemMap)->bool {!idle(mem) || mem.ffta_battle_mouse.menu_request.is_some()}
 /// No queued or held synthetic press.
@@ -821,10 +830,17 @@ pub fn idle(mem:&MemMap)->bool {
     let s=&mem.ffta_battle_mouse;
     s.buttons.is_empty() && s.button_hold==0 && s.button_release==0
 }
+/// One short press (2 frames held, 2 released): the game's lists take one
+/// step from it, so host-driven steps run at a step every 4 frames.
+pub fn press_quick(mem:&mut MemMap,key:u16)->bool {
+    if !press(mem,key) {return false;}
+    mem.ffta_battle_mouse.quick=true;
+    true
+}
 pub fn press_sequence(mem:&mut MemMap,keys:&[u16])->bool {
     if !mem.ffta_battle_mouse.enabled {return false;}
     let state=&mut mem.ffta_battle_mouse;
-    state.cancel();state.buttons.extend(keys.iter().copied());true
+    state.cancel();state.quick=false;state.buttons.extend(keys.iter().copied());true
 }
 /// Measured Wait prompt: four non-affine arrow pieces, mirrored in X.
 pub fn facing_center(mem:&MemMap)->Option<[f32;2]> {
@@ -849,6 +865,7 @@ pub fn keys(mem: &mut MemMap, physical: u16) -> u16 {
         mem.ffta_battle_mouse.cancel();
         mem.ffta_battle_mouse.graph.cancel();
         mem.ffta_battle_mouse.rows.cancel();
+        mem.ffta_battle_mouse.shop.quantity=None;
         return physical;
     }
     if !mem.ffta_battle_mouse.enabled {
@@ -859,7 +876,11 @@ pub fn keys(mem: &mut MemMap, physical: u16) -> u16 {
         let s=&mut mem.ffta_battle_mouse;
         if s.button_hold>0 {s.button_hold-=1;return s.button_key;}
         if s.button_release>0 {s.button_release-=1;return physical;}
-        if let Some(key)=s.buttons.pop_front(){s.button_key=key;s.button_hold=3;s.button_release=4;return key;}
+        if let Some(key)=s.buttons.pop_front(){
+            s.button_key=key;
+            (s.button_hold,s.button_release)=if s.quick {(1,2)} else {(3,4)};
+            return key;
+        }
     }
     if facing_center(mem).is_some(){return physical;}
     if let Some((base,_,_))=world_cursor(mem) {
@@ -1063,6 +1084,12 @@ impl Machine {
     }
     pub fn ffta_battle_mouse_entry(&mut self) {
         if !self.cpu.thumb() {
+            return;
+        }
+        // Host-driven list steps: return from the effect call before it plays the cursor sound.
+        if self.bus.ffta_battle_mouse.silence_cursor && self.cpu.regs[15]==SOUND_EFFECT && self.cpu.regs[0]&0xffff==0x6d
+            && self.bus.rom.get(0x141540..0x141546)==Some(&[0x00,0xb5,0x00,0x04,0x03,0x0c]) {
+            self.cpu.regs[15]=self.cpu.regs[14]&!1;
             return;
         }
         self.ffta_world_mouse_entry();

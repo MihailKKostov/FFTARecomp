@@ -215,11 +215,12 @@ impl Engine {
             self.mouse.cancel();
             self.party_goal=None;
             if key==0 {self.toggle_shop_info();}
-            // B only closes the item Info window: close it, then go back.
-            else if key==0x3fd && gba_core::ppu::shop_info_open(&self.machine.bus) {battle::press_sequence(&mut self.machine.bus,&[0x2ff,0x3fd]);}
-            else {battle::press(&mut self.machine.bus,key);}
+            // The game is still moving to the shop list's shown rows: the button waits for it.
+            else if self.shop_scroll.catching_up() {self.shop_scroll.deferred=Some(key);}
+            else {self.press_button(key);}
             return;
         }
+        if self.quantity_tap(x,y) {return;}
         let band=self.ui_band();
         let state=&self.machine.bus.ffta_dialogue;
         let index=if matches!(state.extra.kind,PanelKind::Actions|PanelKind::Notice)&&state.extra.active(){Some(1)}
@@ -278,6 +279,12 @@ impl Engine {
         }
         #[cfg(target_os="android")]
         eprintln!("FFTA_TOUCH click x={x:.3} y={y:.3} handled={handled}");
+    }
+    /// A game-style button's key. B only closes the shop's item Info window:
+    /// close it, then go back.
+    pub(crate) fn press_button(&mut self,key:u16){
+        if key==0x3fd && gba_core::ppu::shop_info_open(&self.machine.bus) {battle::press_sequence(&mut self.machine.bus,&[0x2ff,0x3fd]);}
+        else {battle::press(&mut self.machine.bus,key);}
     }
     /// Party menus and lists (MENU, EQUIP, ITEMS, ABILITIES): the game's own
     /// cursor (OAM tiles 0x120-0x127, priority 0; with two lists shown the

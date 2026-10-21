@@ -67,6 +67,8 @@ fn glyph(rom: &[u8], ch: char) -> Option<([[u8; 16]; 16], usize)> {
         '0'..='9' => ch as usize - '0' as usize,
         'A'..='Z' => 10 + ch as usize - 'A' as usize,
         'a'..='z' => 36 + ch as usize - 'a' as usize,
+        '<' => 92,
+        '>' => 93,
         _ => return None,
     };
     let base = FONT + cell * 128;
@@ -173,6 +175,26 @@ pub fn draw(bus: &MemMap, out: &mut [i32], rw: usize, rh: usize, ex: usize, row_
             }
         }
         cx += advance as i32 - 1;
+    }
+}
+
+/// Draws one menu-font glyph into a native UI canvas (`ffta_dialogue`
+/// pixels) with its 16x16 cell at native `cell`: the window text colours, or
+/// the highlighted item's while `active`.
+pub fn draw_glyph_ui(rom: &[u8], canvas: &mut [gba_core::ffta_dialogue::UiPixel], cell: [i32; 2], ch: char, active: bool) {
+    use gba_core::ffta_dialogue::{UiPixel, LAYER_INSET, LAYER_WIDTH};
+    if !available(rom) { return; }
+    let Some((pixels, _)) = glyph(rom, ch) else { return };
+    let color = |index: u8| {
+        let o = PALETTES + ((if active { TEXT_ACTIVE } else { FRAME }) * 16 + index as usize) * 2;
+        u16::from_le_bytes([rom[o], rom[o + 1]]) & 0x7fff
+    };
+    for (y, row) in pixels.iter().enumerate() {
+        for (x, &index) in row.iter().enumerate() {
+            let (cx, cy) = (cell[0] + x as i32 + LAYER_INSET, cell[1] + y as i32);
+            if index == 0 || !(0..LAYER_WIDTH as i32).contains(&cx) || !(0..160).contains(&cy) { continue; }
+            if let Some(p) = canvas.get_mut(cy as usize * LAYER_WIDTH + cx as usize) { *p = UiPixel::opaque(color(index)); }
+        }
     }
 }
 
