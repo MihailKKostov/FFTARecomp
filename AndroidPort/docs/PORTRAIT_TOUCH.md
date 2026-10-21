@@ -126,6 +126,32 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.40-android-preview
+
+**Shop safety (audit phase 1).** The shop's state is read from the game
+(gba-core `ffta_shop_mouse::phase`): manager [0x0200f428] +0x148c holds the
+running handler (menu 0x08068c11, Buy 0x08069659, Sell 0x0806b6d1; cleared
+to 0 when the shop is left) and +0x1490 its step. Resting steps (USA): menu
+5; list 23 (60-63 while the game toggles item Info); quantity 43; price
+confirmation 102; a message waiting for a button 103 (Thanks) and 123
+(cannot sell equipped); anything else is a transition.
+- A tap on nothing no longer presses A in portrait shops (it chose items,
+  confirmed quantities and completed purchases): only a waiting message
+  continues on a tap anywhere. Landscape, without an A button, keeps A.
+- Buttons follow the state, never the blinking pointer: list Buy/Sell and
+  Return (Info setting at the top right), quantity Buy/Sell and Return,
+  price confirmation OK and Cancel, messages OK; none in the menu or while
+  it changes.
+- Shop list taps use only the game's own list (direct selection); the old
+  Up/Down stepping fallback, which could keep pressing for 10 seconds into
+  the quantity and confirmation, is gone. Stepping goals end with the Party
+  screens they belong to.
+- Category tabs work while item Info is open (the Info window's WIN1 is no
+  longer taken for the quantity window).
+- Measured: 45 stray taps each in the list, the quantity and the price
+  confirmation never changed Clan Funds; buttons steady over 200 frames of
+  selecting, switching categories and toggling Info.
+
 ## 0.39-android-preview
 
 **No "R Info" hint in touch-only shops.** The game's hint (OAM tiles

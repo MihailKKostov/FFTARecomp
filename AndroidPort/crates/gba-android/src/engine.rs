@@ -205,6 +205,7 @@ impl Engine {
         }
         if self.menu_layout.is_some() {return row(&bus.rom,236,&[("Return",back,false)]);}
         if self.town_buttons() {
+            if let Some(phase)=gba_core::ffta_shop_mouse::phase(bus) {return self.shop_buttons(phase);}
             // Menus offering Leave (the town root menus) have no Return; lists
             // and other sub-menus (a menu pointer, no root menu) do.
             if bus.ffta_dialogue.town_layout || party_cursor(bus).is_none() {return Vec::new();}
@@ -223,6 +224,28 @@ impl Engine {
             return row(&bus.rom,236,&[("Return",back,false)]);
         }
         Vec::new()
+    }
+    /// Shop buttons by where the shop is (none in its menu, which has Leave,
+    /// or while it changes): lists choose the selected item or go back, with
+    /// the Info setting at the top right; quantity confirms or goes back; the
+    /// price confirmation is OK or Cancel; a message waits for OK.
+    fn shop_buttons(&self,phase:gba_core::ffta_shop_mouse::ShopPhase)->Vec<crate::game_buttons::Button>{
+        use gba_core::ffta_shop_mouse::ShopPhase;
+        use crate::game_buttons::{row,Button};
+        let rom=&self.machine.bus.rom;
+        let (ok,back)=(0x3fe,0x3fd);
+        let choose=|sell:bool|if sell {"Sell"} else {"Buy"};
+        match phase {
+            ShopPhase::List{sell}=>{
+                let mut buttons=row(rom,236,&[(choose(sell),ok,false),("Return",back,false)]);
+                buttons.extend(row(rom,236,&[("Info",0,self.shop_info)]).into_iter().map(|b|Button{top:true,..b}));
+                buttons
+            }
+            ShopPhase::Quantity{sell}=>row(rom,236,&[(choose(sell),ok,false),("Return",back,false)]),
+            ShopPhase::Confirm{..}=>row(rom,236,&[("OK",ok,false),("Cancel",back,false)]),
+            ShopPhase::Message=>row(rom,236,&[("OK",ok,false)]),
+            ShopPhase::Menu|ShopPhase::Busy=>Vec::new(),
+        }
     }
     /// Keeps the game's item Info window open or closed, as set, wherever the
     /// shop offers it (its own R toggle, at most every 30 frames). It opens
@@ -262,7 +285,8 @@ impl Engine {
     fn drive_party_goal(&mut self){
         let Some(mut goal)=self.party_goal else {return};
         let bus=&mut self.machine.bus;
-        if bus.frames>goal.deadline || (goal.row.is_none() && !bus.menu_screen.frame) {self.party_goal=None;return;}
+        // Goals belong to Party screens: they end when those do (never step on elsewhere).
+        if bus.frames>goal.deadline || !bus.menu_screen.frame {self.party_goal=None;return;}
         if !battle::idle(bus) {return;}
         if let Some(target)=goal.graph {
             // The jump is made by the game's own routine; A once it has settled.

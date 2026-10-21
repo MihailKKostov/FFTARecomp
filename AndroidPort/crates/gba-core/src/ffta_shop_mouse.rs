@@ -1,7 +1,9 @@
 //! Mouse targets from the original shop category widget, not translated labels.
 use crate::{ffta_rom::Version,mem::MemMap,Machine};
 #[derive(Clone,Copy)]
-struct Profile { start:u32,commit:u32,end:u32,inventory:u32,handlers:[u32;2] }
+struct Profile { start:u32,commit:u32,end:u32,inventory:u32,handlers:[u32;2],
+    /// The shop menu's handler, where its steps were measured (USA).
+    menu:Option<u32> }
 #[derive(Clone,Copy)]
 struct Request { base:usize,slot:u8,source:u8,ids:[u8;6],count:u8,deadline:u64,committed:Option<u64> }
 #[derive(Default)]
@@ -15,7 +17,9 @@ impl State {
             || rom.get(inventory..inventory+12)!=Some(&[0xf0,0xb5,0x87,0xb0,6,0x1c,0x11,0x4f,0x39,0x68,0x11,0x4a]) {return Self::default();}
         Self {profile:Some(Profile{start:0x08000000+start as u32,commit:0x08000030+start as u32,
             end:0x0800003c+start as u32,inventory:0x08000001+inventory as u32,
-            handlers:match version {Version::Usa=>[0x08069659,0x0806b6d1],Version::Europe=>[0x0806bb0d,0x0806db7d]}}),request:None,deferred:None}
+            handlers:match version {Version::Usa=>[0x08069659,0x0806b6d1],Version::Europe=>[0x0806bb0d,0x0806db7d]},
+            menu:(version==Version::Usa && rom.get(0x68c10..0x68c18)==Some(&[0xf0,0xb5,0x4f,0x46,0x46,0x46,0xc0,0xb4])).then_some(0x08068c11)}),
+            request:None,deferred:None}
     }
     pub(crate) fn cancel(&mut self) {self.request=None;self.deferred=None;}
     pub(crate) fn pending(&self)->bool {self.request.is_some()}
@@ -43,7 +47,34 @@ fn context(mem:&MemMap)->Option<Context> {
     let x=*mem.ewram.get(base+0x78)? as i32*8;
     let y=*mem.ewram.get(base+0x79)? as i32*8;
     if x+count as i32*16>240 || y+16>160 {return None;}
-    Some(Context{base,count,current,ids,x,y,overlay:half(&mem.io,0)?&0x4000!=0,cursor})
+    // WIN1 frames the quantity window; the item Info window uses it too.
+    let overlay=half(&mem.io,0)?&0x4000!=0 && !crate::ppu::shop_info_open(mem);
+    Some(Context{base,count,current,ids,x,y,overlay,cursor})
+}
+
+/// Where the shop is, from its running handler and that handler's step
+/// (manager [0x0200f428] +0x148c handler, +0x1490 step; measured USA):
+/// the menu rests at 5; Buy and Sell lists at 23 (60-63: the game toggling
+/// item Info), quantity at 43, the price confirmation at 102, and wait for a
+/// button after a message at 103 (Thanks) and 123 (cannot sell equipped).
+/// Every other step is a transition.
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub enum ShopPhase { Menu, List{sell:bool}, Quantity{sell:bool}, Confirm{sell:bool}, Message, Busy }
+pub fn phase(mem:&MemMap)->Option<ShopPhase> {
+    let p=mem.ffta_battle_mouse.shop.profile?;
+    let menu=p.menu?;
+    let manager=word(&mem.ewram,0xf428)?.checked_sub(0x02000000)? as usize;
+    let handler=word(&mem.ewram,manager.checked_add(0x148c)?)?;
+    let step=*mem.ewram.get(manager+0x1490)?;
+    if handler==menu {return Some(if step==5 {ShopPhase::Menu}else{ShopPhase::Busy});}
+    let sell=match p.handlers.iter().position(|&h|h==handler)? {0=>false,_=>true};
+    Some(match step {
+        23|60..=63=>ShopPhase::List{sell},
+        43=>ShopPhase::Quantity{sell},
+        102=>ShopPhase::Confirm{sell},
+        103|123=>ShopPhase::Message,
+        _=>ShopPhase::Busy,
+    })
 }
 pub(crate) fn active(mem:&MemMap)->bool {context(mem).is_some()}
 pub fn select_category(mem:&mut MemMap,slot:u8)->bool {
@@ -156,6 +187,26 @@ mod tests {
         let ids:&[u8]=if sell {&[1,2,3,5]}else{&[0,1,2,3,4,5]};
         m.bus.ewram[base+7]=ids.len()as u8;m.bus.ewram[base+1..base+1+ids.len()].copy_from_slice(ids);
         m.bus.ewram[base+0x78]=2;m
+    }
+    #[test]
+    fn shop_phase_follows_the_handler_and_its_resting_steps() {
+        let mut m=fixture(Version::Usa,false);
+        m.bus.rom[0x68c10..0x68c18].copy_from_slice(&[0xf0,0xb5,0x4f,0x46,0x46,0x46,0xc0,0xb4]);
+        m.bus.ffta_battle_mouse.shop=State::new(&m.bus.rom,Version::Usa);
+        let set=|m:&mut Machine,handler:u32,step:u8|{
+            m.bus.ewram[0x1000+0x148c..0x1000+0x1490].copy_from_slice(&handler.to_le_bytes());m.bus.ewram[0x1000+0x1490]=step;
+        };
+        for (handler,step,expected) in [
+            (0x08068c11,5,Some(ShopPhase::Menu)),(0x08068c11,21,Some(ShopPhase::Busy)),
+            (0x08069659,23,Some(ShopPhase::List{sell:false})),(0x08069659,61,Some(ShopPhase::List{sell:false})),
+            (0x0806b6d1,43,Some(ShopPhase::Quantity{sell:true})),(0x08069659,102,Some(ShopPhase::Confirm{sell:false})),
+            (0x08069659,103,Some(ShopPhase::Message)),(0x0806b6d1,123,Some(ShopPhase::Message)),
+            (0x08069659,200,Some(ShopPhase::Busy)),(0,255,None),
+        ] {set(&mut m,handler,step);assert_eq!(phase(&m.bus),expected,"{handler:08x} {step}");}
+        // Europe: the steps were not measured there.
+        let mut e=fixture(Version::Europe,false);
+        e.bus.ewram[0x1000+0x148c..0x1000+0x1490].copy_from_slice(&0x0806bb0du32.to_le_bytes());e.bus.ewram[0x1000+0x1490]=23;
+        assert_eq!(phase(&e.bus),None);
     }
     #[test]
     fn categories_use_available_ids_and_original_store_for_both_regions() {

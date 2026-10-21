@@ -269,7 +269,13 @@ impl Engine {
             handled=if self.mouse.scene(&self.machine.bus).is_some(){self.mouse.aim(&self.machine.bus,nx,ny,true)}
                 else{battle::aim(&mut self.machine.bus,nx,ny,true)};
         }
-        if !handled {self.mouse.cancel();battle::press(&mut self.machine.bus,0x3fe);}
+        // A tap on nothing confirms (A), except in a portrait shop with its own
+        // buttons, where only a waiting message continues: elsewhere it would
+        // choose, buy or sell. (Landscape has no A button: a tap stays A.)
+        let shop=gba_core::ffta_shop_mouse::phase(&self.machine.bus).filter(|_|self.town_buttons());
+        if !handled && shop.is_none_or(|p|p==gba_core::ffta_shop_mouse::ShopPhase::Message) {
+            self.mouse.cancel();battle::press(&mut self.machine.bus,0x3fe);
+        }
         #[cfg(target_os="android")]
         eprintln!("FFTA_TOUCH click x={x:.3} y={y:.3} handled={handled}");
     }
@@ -318,35 +324,16 @@ impl Engine {
         true
     }
     /// Shop Buy and Sell lists: a tap on an item selects it (the game's cursor
-    /// moves there with Up/Down, so its Info and stats follow); a tap on the
-    /// selected item chooses it (A), like the Buy/Sell button. Returns false
-    /// outside the list's rows.
+    /// routine jumps straight there, so its Info and stats follow); a tap on
+    /// the selected item chooses it (A), like the Buy/Sell button. Returns
+    /// false off the list's rows (tabs, other windows).
     fn shop_list_tap(&mut self,x:f32,y:f32)->bool{
-        let bus=&self.machine.bus;
-        let Some((cx,cy))=crate::engine::shop_list_cursor(bus) else {return false};
-        // The game's shop list (its cursor routine jumps straight to the item).
-        if let Some(scene)=battle::MenuScene::read(bus) {
-            if let Some(target)=scene.hit(x,y) {
-                self.mouse.cancel();
-                if target==scene.selected {battle::press(&mut self.machine.bus,0x3fe);}
-                else {battle::menu_select(&mut self.machine.bus,target,false);}
-                return true;
-            }
-        }
-        if x<(cx-8) as f32 || x>(cx+232) as f32 {return false;}
-        let steps=((y-(cy-4) as f32)/16.).floor() as i32;
-        let row=cy+steps*16;
-        // The row must hold the item's text in the list canvas.
-        let pixels=&bus.ffta_dialogue.pixels;
-        let width=dialogue::LAYER_WIDTH;
-        let text=(row.max(0)..(row+12).min(160)).any(|r|((cx+16) as usize..(cx+120) as usize).any(|c|{
-            pixels.get(r as usize*width+c+dialogue::LAYER_INSET as usize).is_some_and(|p|p.visible())
-        }));
-        if !text {return false;}
+        if crate::engine::shop_list_cursor(&self.machine.bus).is_none() {return false;}
+        let Some(scene)=battle::MenuScene::read(&self.machine.bus) else {return false};
+        let Some(target)=scene.hit(x,y) else {return false};
         self.mouse.cancel();
-        if steps==0 {battle::press(&mut self.machine.bus,0x3fe);return true;}
-        self.party_goal=Some(crate::engine::PartyGoal{target:0,confirm:false,deadline:self.machine.bus.frames+600,
-            pressed:None,cursor:[0;4],still:0,row:Some(row),graph:None,list:None});
+        if target==scene.selected {battle::press(&mut self.machine.bus,0x3fe);}
+        else {battle::menu_select(&mut self.machine.bus,target,false);}
         true
     }
     /// A tap on a unit in the party picture: on the roster the game's cursor
