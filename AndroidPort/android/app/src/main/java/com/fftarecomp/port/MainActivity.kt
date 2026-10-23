@@ -460,7 +460,10 @@ private fun GameScreen(settings:GameSettings,input:GameInput,save:File,onExit:()
     val safeTop=WindowInsets.safeDrawing.getTop(density).toFloat()
     val safeBottom=WindowInsets.safeDrawing.getBottom(density).toFloat()
     val gamepadShown=!touchOnly&&settings.touchVisible&&settings.controls
-    val dockTop=safeTop+with(density){(if(touchOnly&&settings.touchVisible)56.dp else 8.dp).toPx()}
+    // Touch-only portrait is played by tapping what the game shows: no GBA
+    // button bar (pause with the system back gesture; fast forward in the menu).
+    val buttonBar=touchOnly&&settings.touchVisible&&!portrait
+    val dockTop=safeTop+with(density){(if(buttonBar)56.dp else 8.dp).toPx()}
     val dockBottomInset=safeBottom+with(density){8.dp.toPx()}
     val dockReserve=if(gamepadShown).33f else 0f
     SideEffect{settings.touch.portrait=portrait}
@@ -528,9 +531,9 @@ private fun GameScreen(settings:GameSettings,input:GameInput,save:File,onExit:()
             it.onMenuButton={rect->activity.runOnUiThread{mapMenu=rect}}}},modifier=Modifier.fillMaxSize())
         val menuRect=mapMenu
         if(touchOnly&&!paused&&!editingTouch&&menuRect!=null)MapMenuButton(menuRect,settings,input)
-        if(touchOnly&&settings.touchVisible&&!paused&&!editingTouch)TouchOnlyBar(settings,input,
+        if(buttonBar&&!paused&&!editingTouch)TouchOnlyBar(settings,input,
             onPause={paused=true;page="main";input.clear();settings.pad.clear();settings.holdFast=false})
-        else if((settings.touchVisible&&!paused)||editingTouch)TouchOverlay(settings,input,editingTouch,
+        else if((settings.touchVisible&&!paused&&!touchOnly)||editingTouch)TouchOverlay(settings,input,editingTouch,
             onPause={paused=true;page="main";input.clear();settings.pad.clear();settings.holdFast=false},
             onSave={settings.touch.save();editingTouch=false},
             onCancel={settings.touch.layout.restore(originalTouch);settings.touch.vibration=originalVibration;editingTouch=false})

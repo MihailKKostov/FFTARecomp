@@ -126,6 +126,33 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.50-android-preview
+
+**No blind A where the player chooses.** Touch-only portrait: a tap that
+hits nothing presses A only where there is nothing to choose (dialogue,
+messages, cutscenes). It does nothing on any game menu (its pointer, OAM
+tiles 0x120-0x127, or a menu the touch adapters know: cursor graphs, shop
+and battle menus), the Party screens, shops (but a waiting message) and the
+world map (but a message over it with no menu). Landscape keeps tap = A
+everywhere. Measured: on the world map a tap on empty map does nothing, a
+tap on a location moves the cursor there and a second one travels; the
+shop's opening menu no longer chooses Buy on a stray tap; the intro
+dialogue moves on with every tap.
+
+**The menu pointer is not dialogue's arrow.** Dialogue's continuation
+arrow (8x16, palette 2, tile 0x122) shares the menu pointer's tiles: it no
+longer counts as a menu pointer (it showed a Return button in cutscenes and
+would have stopped taps moving dialogue on).
+
+**No GBA buttons in touch-only portrait.** The bar of B, Start, Select, L,
+R, fast forward and Pause is not shown in touch-only portrait (landscape
+keeps it): the game is played by tapping what it shows. Pause with the
+system back gesture; fast forward is in the pause menu. The docking frame
+starts 8 dp under the safe area instead of 56 dp, so the world map laws,
+the shop's Info button, docked panels and the Party screens all move up.
+With it went the L button that opened the game's own law list; the laws
+open with a tap on them.
+
 ## 0.49-android-preview
 
 **Tap the laws for the whole list.** The Laws button is gone: a tap on the

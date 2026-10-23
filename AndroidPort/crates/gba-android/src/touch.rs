@@ -288,15 +288,31 @@ impl Engine {
             handled=if self.mouse.scene(&self.machine.bus).is_some(){self.mouse.aim(&self.machine.bus,nx,ny,true)}
                 else{battle::aim(&mut self.machine.bus,nx,ny,true)};
         }
-        // A tap on nothing confirms (A), except in a portrait shop with its own
-        // buttons, where only a waiting message continues: elsewhere it would
-        // choose, buy or sell. (Landscape has no A button: a tap stays A.)
-        let shop=gba_core::ffta_shop_mouse::phase(&self.machine.bus).filter(|_|self.town_buttons());
-        if !handled && shop.is_none_or(|p|p==gba_core::ffta_shop_mouse::ShopPhase::Message) {
+        // A tap on nothing confirms (A) only where there is nothing to choose
+        // (dialogue, messages): see `blind_confirm`.
+        if !handled && self.blind_confirm() {
             self.mouse.cancel();battle::press(&mut self.machine.bus,0x3fe);
         }
         #[cfg(target_os="android")]
         eprintln!("FFTA_TOUCH click x={x:.3} y={y:.3} handled={handled}");
+    }
+    /// A tap that hits nothing presses A (moves dialogue and messages on).
+    /// Touch-only portrait: not where the player chooses by tapping, which a
+    /// blind A would choose for them: any game menu (its pointer, OAM tiles
+    /// 0x120-0x127, or a menu the touch adapters know), the Party screens,
+    /// shops (but a waiting message) and the world map (but a message over
+    /// it with no menu). Landscape, with no A button, keeps it everywhere.
+    pub(crate) fn blind_confirm(&self)->bool{
+        let bus=&self.machine.bus;
+        if !(self.touch_enabled && bus.ffta_dialogue.docked) {return true;}
+        if let Some(phase)=gba_core::ffta_shop_mouse::phase(bus).filter(|_|self.town_buttons()) {
+            return phase==gba_core::ffta_shop_mouse::ShopPhase::Message;
+        }
+        let menu=self.menu_layout.is_some() || crate::engine::party_cursor(bus).is_some()
+            || battle::MenuScene::read(bus).is_some() || gba_core::ffta_graph_menu::GraphMenu::read(bus).is_some();
+        if menu {return false;}
+        if bus.world_hud.map_frame {return bus.world_hud.menu;}
+        true
     }
     /// A game-style button's key. B only closes the shop's item Info window:
     /// close it, then go back.

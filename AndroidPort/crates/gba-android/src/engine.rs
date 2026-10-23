@@ -54,12 +54,14 @@ pub(crate) fn shop_list_cursor(bus:&gba_core::mem::MemMap)->Option<(i32,i32)>{
 }
 
 /// The game's menu cursor on Party screens (OAM tiles 0x120-0x127, priority 0;
-/// with two lists shown the later one is the active list's).
+/// with two lists shown the later one is the active list's). Not dialogue's
+/// continuation arrow (8x16, palette 2, tile 0x122), which shares the tiles.
 pub(crate) fn party_cursor(bus:&gba_core::mem::MemMap)->Option<(i32,i32)>{
     let half=|o:&[u8],i:usize|u16::from_le_bytes([o[i],o[i+1]]);
     bus.oam.chunks_exact(8).filter(|o|{
         let (a0,a2)=(half(o,0),half(o,4));
-        a0&0x300!=0x200 && (0x120..=0x127).contains(&(a2&1023)) && (a2>>10)&3==0 && (a0&255)<160
+        let arrow=a0&0xff00==0x8000 && a2==0x2122;
+        !arrow && a0&0x300!=0x200 && (0x120..=0x127).contains(&(a2&1023)) && (a2>>10)&3==0 && (a0&255)<160
     }).map(|o|((half(o,2)&511) as i32,(half(o,0)&255) as i32)).last()
 }
 
