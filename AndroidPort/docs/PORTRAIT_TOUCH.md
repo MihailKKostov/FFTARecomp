@@ -126,6 +126,32 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.57-android-preview
+
+**Hold to hurry dialogue.** A finger held (15 frames, a quarter second) where
+a tap moves the dialogue on prints its text 8x faster; nothing else of the
+game runs faster. While still held, a finished page turns after 20 frames,
+so a held finger plays a conversation through. Lifted sooner, it is a tap
+as before. Never where there is something to choose: a menu, a notice
+(Yes/No), the battle's field cursor or facing; the page waits there for the
+player's own tap.
+- Holding A or B does not hurry the game's text (measured: the same
+  character every two frames either way), so the printer itself is hurried.
+  The message being printed is the one at EWRAM 0x918c (0 when none; the
+  text engine's literal pool at ROM 0x129f4 holds that address, the USA
+  check). Its text pointer at +0x308 reads its own buffer from +0x30c, 2
+  bytes a character; it adds 0x80 a frame to the 8.8 accumulator at +0x18
+  and prints a character for each 0x100 there. Held at 0x400 it prints four
+  a frame (measured: "Let's get ready, then." in 6 frames instead of 45).
+  Its state at +8 is 5 while printing, 6 when the page waits for a button,
+  also on pages the game shows no arrow on.
+- Touch only: the engine follows a finger put down on such dialogue
+  (`Gesture::Dialogue`), and taps on its lift when it was short.
+Measured in Sprohm's pub after accepting a mission: held from "Right away!",
+the three pages turned and printed fast; the NOTICE ("Accept these
+conditions?") stayed open under a held finger; a quick tap closed a page
+as before.
+
 ## 0.56-android-preview
 
 **Battles by touch.**

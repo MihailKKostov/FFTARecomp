@@ -27,6 +27,9 @@ pub(crate) enum Gesture {
     Unit { start: (f32, f32), moved: bool, switched: bool },
     /// The world map's law list follows the finger (`scroll` at the start).
     Laws { start: (f32, f32), scroll: f32, moved: bool },
+    /// Dialogue: a tap moves it on; held (`since` the frame it touched), it
+    /// is hurried (`text_speed`), `arrow` the frame its page finished.
+    Dialogue { start: (f32, f32), since: u64, arrow: Option<u64> },
 }
 
 /// Quantity arrows beside the game's quantity window (native, from WIN1).
@@ -137,6 +140,10 @@ impl Engine {
             self.gesture = Some(Gesture::Unit { start: (x, y), moved: false, switched: false });
             return true;
         }
+        if self.dialogue_hold() {
+            self.gesture = Some(Gesture::Dialogue { start: (x, y), since: self.machine.bus.frames, arrow: None });
+            return true;
+        }
         false
     }
     pub fn pointer_move(&mut self, x: f32, y: f32) {
@@ -191,7 +198,8 @@ impl Engine {
                 }
                 self.gesture = Some(Gesture::Shop { start, native, anchor, vertical, start_pos, samples });
             }
-            None => {}
+            // Held anywhere: the finger may slide.
+            Some(Gesture::Dialogue { .. }) | None => {}
         }
     }
     /// The finger is lifted (or the gesture cancelled).
@@ -200,6 +208,8 @@ impl Engine {
         if cancel { return; }
         match gesture {
             Some(Gesture::Party { start, moved: false, .. } | Gesture::Unit { start, moved: false, .. }) => self.tap(start.0, start.1, false),
+            // Lifted before it hurried: a tap.
+            Some(Gesture::Dialogue { start, since, .. }) if self.machine.bus.frames < since + crate::text_speed::HOLD => self.tap(start.0, start.1, false),
             Some(Gesture::Shop { start, native, vertical: None, .. }) => self.shop_rows_tap(start.0, start.1, native.0, native.1),
             Some(Gesture::Shop { native, vertical: Some(vertical), samples: [(f0, x0, y0), (f1, x1, y1)], anchor, .. }) => {
                 let frames = (f1.saturating_sub(f0)).max(1) as f32;
@@ -214,6 +224,12 @@ impl Engine {
             }
             _ => {}
         }
+    }
+    /// Each emulated frame: a finger held on dialogue hurries it.
+    pub(crate) fn drive_dialogue_gesture(&mut self) {
+        let Some(Gesture::Dialogue { start, since, mut arrow }) = self.gesture else { return };
+        self.drive_dialogue_hold(since, &mut arrow);
+        if matches!(self.gesture, Some(Gesture::Dialogue { .. })) { self.gesture = Some(Gesture::Dialogue { start, since, arrow }); }
     }
     /// Once per frame: repeats a held quantity arrow.
     pub(crate) fn drive_gestures(&mut self) {

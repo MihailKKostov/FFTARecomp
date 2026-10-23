@@ -576,6 +576,7 @@ impl Engine {
         self.drive_pub();
         for index in 0..count {
             self.drive_party_goal();
+            self.drive_dialogue_gesture();
             let m = &mut *self.machine;
             m.bus.skip_render=self.skip_hidden_frames && index+1<count;
             let keys=self.mouse.keys(&mut m.bus,(KEYS.load(Ordering::Relaxed) as u16)&0x3ff);
