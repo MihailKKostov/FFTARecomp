@@ -26,6 +26,8 @@ const LEFT: u16 = 0x3df;
 const RIGHT: u16 = 0x3ef;
 const UP: u16 = 0x3bf;
 const DOWN: u16 = 0x37f;
+/// The Return button on a rumor's text: closes it (A page by page).
+pub(crate) const CLOSE_RUMOR: u16 = 3;
 
 fn half(data: &[u8], offset: usize) -> u16 { u16::from_le_bytes([data[offset], data[offset + 1]]) }
 
@@ -75,6 +77,7 @@ impl Engine {
         use crate::game_buttons::row;
         let bus = &self.machine.bus;
         if notice(bus).is_some() { return Some(row(&bus.rom, 236, &[("Yes", A, false), ("No", B, false)])); }
+        if rumor_text(bus) { return Some(row(&bus.rom, 236, &[("Return", CLOSE_RUMOR, false)])); }
         if mission_pages(bus) { return Some(row(&bus.rom, 236, &[("OK", A, false), ("Return", B, false)])); }
         None
     }
@@ -98,6 +101,15 @@ impl Engine {
         };
         if let Some(key) = key { self.mouse.cancel(); battle::press(&mut self.machine.bus, key); }
         true
+    }
+    /// Closes a rumor's text (`CLOSE_RUMOR`): A, page by page, while it shows.
+    pub(crate) fn close_rumor(&mut self) { self.rumor_close = Some(self.machine.bus.frames + 600); }
+    /// Once a frame: presses A on the rumor being closed, each time the game takes input.
+    pub(crate) fn drive_pub(&mut self) {
+        let Some(until) = self.rumor_close else { return };
+        let bus = &mut self.machine.bus;
+        if bus.frames > until || !rumor_text(bus) { self.rumor_close = None; return; }
+        if battle::idle(bus) { battle::press(bus, A); }
     }
     /// A menu with the game's pointer but no list the other adapters know (the
     /// pub's mission item slots, "<--->", "<--->", "OK"): rows 16 apart with the

@@ -126,6 +126,22 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.53-android-preview
+
+**Return on a rumor.** A rumor's text has a Return button: it closes the
+rumor (A page by page while it shows, each time the game takes input) and
+the list is back. Measured: closed from its first page in one tap.
+
+**Not done yet (needs a save with more missions).** Marking missions the
+clan cannot afford, a message when a mission cannot be cancelled, and
+scrolling long mission lists need the listed missions' data. The mission
+records are in the ROM (USA 0x51c220 + 0x20 per id: +0 id, +2 name text,
++4 reward, +6 fee; Herb Picking is id 0x102, reward 600, fee 300), but
+which record each list row shows is not known yet: the list (EWRAM 0x25ee0,
+its cursor at 0x25f00) holds 0x103 for Herb Picking, and changing it does
+not change the details. With one mission on the board the mapping cannot
+be checked.
+
 ## 0.52-android-preview
 
 **The pub by touch** (`pub_touch.rs`). The pub's mission screens and
