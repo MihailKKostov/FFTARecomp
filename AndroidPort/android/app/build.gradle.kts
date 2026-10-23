@@ -12,8 +12,8 @@ android {
         applicationId = "com.fftarecomp.port"
         minSdk = 24
         targetSdk = 35
-        versionCode = 44
-        versionName = "0.44-android-preview"
+        versionCode = 45
+        versionName = "0.45-android-preview"
         ndk { abiFilters += "arm64-v8a" }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

@@ -126,6 +126,38 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.45-android-preview
+
+**The laws on the world map** (`laws.rs`). Under the top of the portrait
+world map, between "L Law" and "R Info", the law in force is always shown
+as the game shows it: the law list's title bar ("FORBIDDEN", "RECOMMEND")
+and its first row, the forbidden law and the recommended one. A Laws
+button above it (game style, highlighted while open) shows the whole list
+under it: every law of the rotation in order, each row with both its
+forbidden and recommended law (the game shows the recommended one only for
+the selected row). A drag scrolls it where it does not fit; a tap off it
+(on the map) closes it, a tap on it does nothing.
+
+How the laws are read:
+- The game's list (L on the map, USA) is a BG2/BG3 window: title bar
+  on native rows 20-31, rows 16 high from row 32, the selected row with its
+  recommended law beside it, the pointer a 16x8 sprite (tile 0, priority 0)
+  four rows into it. Down walks the rotation and wraps to the first row.
+- In a silent run from a snapshot (as the shop reads its rows: 4 frames a
+  frame, then the real machine back), L opens the list; each selected row is
+  taken once it has been still for 3 frames and differs from the row taken
+  before (the list scrolls a few frames after the pointer reaches its last
+  row), Down moves on (again after 40 frames if nothing moved), until the
+  first row comes back. Only BG2/BG3 are read (`ppu::native_layers`), so the
+  rows come without the map. Measured: 20 laws, about 70 frames shown.
+- The run is made when the date shown (the HUD's date box) has been the
+  same for 8 frames and differs from the one the list was read on, while
+  the map waits for input (no game menu, no fade). While the date differs
+  nothing is shown (travel). Measured: Kingmoon 1, "Shell"/"Silence";
+  after travelling to day 4, "Protect"/"Poison" (as the game's own list).
+- Hidden while a game menu or list is open (the game's own L list
+  included) and off the world map; fades with the map.
+
 ## 0.44-android-preview
 
 **A border between the party and the unit.** Across the screen above the

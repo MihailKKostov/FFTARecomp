@@ -706,6 +706,20 @@ fn notice_bounds(mem:&MemMap)->Option<[i32;4]> {
 }
 /// The shop's item Info window is open.
 pub fn shop_info_open(mem:&MemMap)->bool {shop_info_bounds(mem).is_some()}
+/// Text BG layers `mask` (bit n: BGn) of native row `line` as the hardware
+/// draws them, composed by priority over nothing: 240 RGB555 pixels, 0xFFFF
+/// where none of them draws (no sprites, windows or blending).
+pub fn native_layers(mem:&MemMap,mask:u8,line:usize)->[u16;240] {
+    let mut order:Vec<usize>=(0..4).filter(|&bg|mask&(1<<bg)!=0).collect();
+    order.sort_by_key(|&bg|(io16(mem,8+2*bg)&3,bg));
+    let mut out=[TRANSPARENT;240];
+    let mut row=[TRANSPARENT;MAX_RENDER_WIDTH];
+    for &bg in order.iter().rev() {
+        render_text_bg_hardware(mem,bg,line,&mut row,0,240);
+        for (o,&p) in out.iter_mut().zip(&row[..240]) {if p!=TRANSPARENT {*o=p;}}
+    }
+    out
+}
 /// The shop list was kept to be drawn under the Info window.
 pub fn shop_list_kept(mem:&MemMap)->bool {mem.ffta_dialogue.shop_maps.is_some()}
 /// The shop's item Info window: WIN1 framing the window the game draws into

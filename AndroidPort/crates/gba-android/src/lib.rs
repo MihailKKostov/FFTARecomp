@@ -10,6 +10,7 @@ mod ui_layout;
 pub mod touch;
 mod gestures;
 mod shop_scroll;
+mod laws;
 mod title_touch;
 mod world_map;
 pub mod game_buttons;

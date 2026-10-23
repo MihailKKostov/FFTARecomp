@@ -94,6 +94,8 @@ pub struct Engine {
     party_open_first: bool,
     party_leave: Option<u64>,
     party_bar: Option<(u16,u64,u32)>,
+    /// Portrait world map laws (laws.rs).
+    pub(crate) laws: crate::laws::Laws,
     /// Town root menu (item count, selected item) last shown: names the shop list's button.
     shop_choice: (u8,u8),
     /// Last battery save written, and the frame of the last resume state.
@@ -470,7 +472,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,laws:Default::default(),shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -554,6 +556,7 @@ impl Engine {
         let count=count.clamp(1,8);
         self.drive_gestures();
         self.shop_scroll_tick()?;
+        self.laws_tick()?;
         self.drive_party_flow();
         for index in 0..count {
             self.drive_party_goal();
@@ -611,8 +614,11 @@ impl Engine {
         self.party_shown=shown;
         self.shop_scroll_present();
         self.draw_quantity_arrows();
+        let laws=if expanded_rows {self.laws_present(dock)} else {None};
         let buttons=self.scene_buttons();
         let s=rect[3]/mem::render_height() as f32;
+        self.laws.screen_area=self.laws.area.map(|(a,b)|(rect[1]+a as f32*s,rect[1]+b as f32*s));
+        self.laws.scale=s;
         self.top_row=buttons.iter().any(|b|b.top);
         self.buttons=buttons.into_iter().map(|button|{
             let offset=if button.top {dock.0+1-crate::game_buttons::ROW.0} else {dock.1-160};
@@ -622,6 +628,14 @@ impl Engine {
                 (button.x.1-button.x.0) as f32*s,(y1-y0) as f32*s];
             (button,screen)
         }).collect();
+        // The law list's button beside the laws in force, in rows of its own.
+        if let Some((button,offset))=laws {
+            crate::game_buttons::draw(&self.machine.bus,&mut self.pixels,mem::render_width(),mem::render_height(),mem::extra(),offset,&button);
+            let (y0,y1)=crate::game_buttons::ROW;
+            let screen=[rect[0]+(mem::extra() as i32+button.x.0) as f32*s,rect[1]+(offset+y0) as f32*s,
+                (button.x.1-button.x.0) as f32*s,(y1-y0) as f32*s];
+            self.buttons.push((button,screen));
+        }
         self.sync_shop_info();
         // The app's own Menu button stands in only where the game's resources are missing.
         self.menu_button=if self.buttons.is_empty() {self.map_menu_button()} else {None};

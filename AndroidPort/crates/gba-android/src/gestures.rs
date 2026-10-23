@@ -24,6 +24,8 @@ pub(crate) enum Gesture {
     /// left) or the one before (to the right), like turning a page, once per
     /// swipe; `moved` once the finger clearly moved (no tap then).
     Unit { start: (f32, f32), moved: bool, switched: bool },
+    /// The world map's law list follows the finger (`scroll` at the start).
+    Laws { start: (f32, f32), scroll: f32, moved: bool },
 }
 
 /// Quantity arrows beside the game's quantity window (native, from WIN1).
@@ -119,6 +121,11 @@ impl Engine {
                 }
             }
         }
+        let py = y * self.ui_window.1 as f32;
+        if self.laws.open && self.laws.screen_area.is_some_and(|(a, b)| py >= a && py < b) {
+            self.gesture = Some(Gesture::Laws { start: (x, y), scroll: self.laws.scroll, moved: false });
+            return true;
+        }
         if self.party_drag_starts(x, y) {
             self.gesture = Some(Gesture::Party { start: (x, y), last_y: y, moved: false });
             return true;
@@ -150,6 +157,12 @@ impl Engine {
                     battle::press(&mut self.machine.bus, if dx < 0. { 0x3ef } else { 0x3df });
                 }
                 self.gesture = Some(Gesture::Unit { start, moved, switched: switched || switch });
+            }
+            Some(Gesture::Laws { start, scroll, moved }) => {
+                let dy = (y - start.1) * h;
+                let moved = moved || dy.abs() >= self.gesture_slop / 3.;
+                if moved && self.laws.scale > 0. { self.laws.scroll = (scroll - dy / self.laws.scale).clamp(0., self.laws.max_scroll); }
+                self.gesture = Some(Gesture::Laws { start, scroll, moved });
             }
             Some(Gesture::Quantity { start, .. }) => {
                 // Sliding off the arrow ends the hold.
