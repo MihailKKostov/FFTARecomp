@@ -15,6 +15,8 @@ const MAP_ROWS: i32 = 352;
 const EDGE_ROWS: i32 = 6;
 const PAPER_FADE: f32 = 48.;
 const STABLE_FRAMES: u16 = 30;
+/// Plain parchment rows at the top and bottom of the map content.
+const PLAIN_ROWS: i32 = 24;
 const MISSING_FRAMES: u16 = 20;
 
 /// Remembered as palette indices so palette fades apply when it is drawn.
@@ -138,10 +140,20 @@ impl WorldMap {
         }
         Ok(WorldMap { towns })
     }
-    /// Rows the texture is shifted by (displayed row r shows rendered row r + shift).
-    pub fn shift(bus: &MemMap) -> i32 {
+    /// Rows the texture is shifted by (displayed row r shows rendered row r + shift),
+    /// the map `drop` rows below the middle.
+    pub fn shift(bus: &MemMap, drop: i32) -> i32 {
         let vofs = (half(&bus.io, 0x12) & 0x1ff) as i32;
-        MAP_CENTER - mem::render_height() as i32 / 2 + mem::extra_y() as i32 - vofs
+        MAP_CENTER - mem::render_height() as i32 / 2 + mem::extra_y() as i32 - vofs - drop
+    }
+    /// Rows to move the map down so its content starts below texture row
+    /// `free` (its first rows are plain parchment, which may stay under it),
+    /// without its last content row going under the frame's bottom.
+    pub fn drop_for(dock: (i32, i32), free: i32) -> i32 {
+        let middle = mem::render_height() as i32 / 2;
+        let wanted = free - PLAIN_ROWS - (middle - MAP_CENTER);
+        let most = dock.1 + PLAIN_ROWS - (middle - MAP_CENTER + MAP_ROWS);
+        wanted.min(most).max(0)
     }
 
     fn remember_towns(&mut self, bus: &MemMap, vofs: i32) {
@@ -174,11 +186,13 @@ impl WorldMap {
     /// Rebuilds `pixels` (render_width x render_height, rendered as usual) into
     /// the still-map presentation. `dock` is the (top, bottom) texture rows the
     /// pinned HUD may occupy.
-    pub fn present(&mut self, bus: &MemMap, pixels: &mut Vec<i32>, dock: (i32, i32)) {
+    /// `hints`: the "L Law" and "R Info" HUD hints are shown (pinned to the
+    /// top); `drop`: rows the map is moved down by (`drop_for`).
+    pub fn present(&mut self, bus: &MemMap, pixels: &mut Vec<i32>, dock: (i32, i32), hints: bool, drop: i32) {
         let (rw, rh) = (mem::render_width(), mem::render_height());
         let (ex, ey) = (mem::extra() as i32, mem::extra_y() as i32);
         let vofs = (half(&bus.io, 0x12) & 0x1ff) as i32;
-        let shift = Self::shift(bus);
+        let shift = Self::shift(bus, drop);
         self.remember_towns(bus, vofs);
         let colors = crate::engine::rgba_colors();
         let backdrop_color = half(&bus.palette, 0) & 0x7fff;
@@ -226,6 +240,7 @@ impl WorldMap {
             let mut gap = 0;
             y += 1;
             while y < 160 && gap < 4 { if row_used(y) { end = y + 1; gap = 0 } else { gap += 1 } y += 1; }
+            if start < 32 && !hints { continue; }
             let offset = if start < 32 { dock.0 } else if end > 128 { dock.1 - 160 } else { vofs - first };
             for row in start..end {
                 let target = row as i32 + offset;
@@ -286,7 +301,7 @@ mod tests {
         let mut shifts = Vec::new();
         for vofs in [114u16, 145, 190] {
             bus.io[0x12..0x14].copy_from_slice(&vofs.to_le_bytes());
-            shifts.push(WorldMap::shift(&bus) + vofs as i32);
+            shifts.push(WorldMap::shift(&bus, 0) + vofs as i32);
         }
         assert!(shifts.windows(2).all(|w| w[0] == w[1]));
         mem::set_extra(0);

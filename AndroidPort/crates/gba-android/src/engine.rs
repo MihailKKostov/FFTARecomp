@@ -602,8 +602,12 @@ impl Engine {
             }
         };
         if expanded_rows && self.machine.bus.world_hud.map_frame {
-            self.world_map.present(&self.machine.bus,&mut self.pixels,dock);
-            self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
+            // Touch-only: no L/R hints (there are no shoulder buttons), and the
+            // map lower, under the laws (laws.rs).
+            let touch=self.touch_enabled && self.machine.bus.ffta_dialogue.docked && crate::game_buttons::available(&self.machine.bus.rom);
+            let drop=if touch {crate::world_map::WorldMap::drop_for(dock,dock.0+crate::laws::BANNER_ROWS)} else {0};
+            self.world_map.present(&self.machine.bus,&mut self.pixels,dock,!touch,drop);
+            self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus,drop);
         }
         self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock,&mut self.party_cache,&mut self.party_scroll)}else{None};
         let shown=self.menu_layout.is_some();

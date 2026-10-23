@@ -126,6 +126,27 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.46-android-preview
+
+**World map laws, rearranged.**
+- Three laws are always shown under the top of the frame: the one in
+  force, flush left, and the next two, indented 16 columns (as the game
+  indents its marked row). The game's own ▶ mark and indent are taken out
+  of the rows read, so only the indent tells the law in force. The open
+  list continues under them, all indented.
+- Forbidden laws are red, recommended ones blue: the pills' palette banks
+  (USA, BG2/BG3: 4 dark blue and 10 red for the law in force, 5 cyan and 9
+  tan for the others; text in entries 1-3, the pill in 10-15) trade places,
+  read from the game's palette during the silent run. The cyan forbidden
+  pills become the red one lightened halfway to white, with the tan pill's
+  text.
+- The Laws button sits under the shown laws (or the open list) on the left.
+- Touch-only portrait: the "L Law" and "R Info" hints are not shown (no
+  shoulder buttons on the screen), and the map is moved down so its content
+  starts under the laws (its first 24 rows are plain parchment and may stay
+  under them), never so far that its content goes under the frame's bottom.
+  Taps follow the map where it is drawn.
+
 ## 0.45-android-preview
 
 **The laws on the world map** (`laws.rs`). Under the top of the portrait

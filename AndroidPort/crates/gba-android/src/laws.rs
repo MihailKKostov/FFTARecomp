@@ -14,6 +14,14 @@
 //! until the first row is back; then the snapshot's machine is dropped. Only
 //! BG2/BG3 are read, so the rows come without the map. The run is made again
 //! when the date shown changes.
+//!
+//! Shown: the title bar, the law in force and the next two always; the rest
+//! under them while the list is open. The law in force is flush left, the
+//! coming ones indented as the game indents its marked row (16 columns; the
+//! game's own ▶ indent is taken out first). Forbidden laws are red and
+//! recommended ones blue: the pills' palettes (BG2/BG3 banks 4 dark blue,
+//! 5 cyan, 9 tan, 10 red; text in entries 1-3, the pill in 10-15) trade
+//! places, the cyan forbidden pills becoming a lighter red.
 use crate::engine::Engine;
 use gba_core::{mem, savestate, world_hud::TRANSPARENT};
 
@@ -27,10 +35,17 @@ const HEADER: (usize, usize) = (20, 32);
 const ROW: usize = 16;
 /// Columns kept (the pills and the title bar), drawn where the game draws them.
 const COLUMNS: (usize, usize) = (16, 232);
-/// Rows under the top of the frame the banner starts at (below "L Law").
-const BANNER_TOP: i32 = 24;
-/// The list's button: centred in the top row, between "L Law" and "R Info".
+/// Rows under the top of the frame the banner starts at.
+const BANNER_TOP: i32 = 4;
+/// Laws always shown (the one in force and the next ones).
+const SHOWN: usize = 3;
+/// Indent of the coming laws, and the columns the game's marked row is indented by.
+const INDENT: usize = 16;
+/// The list's button, under the laws on the left.
 const LABEL: &str = "Laws";
+const BUTTON_X: i32 = 8;
+/// Native rows the shown laws and their button take under the top of the frame.
+pub(crate) const BANNER_ROWS: i32 = BANNER_TOP + (HEADER.1 - HEADER.0) as i32 + (SHOWN * ROW) as i32 + 28;
 /// Silent frames run per frame shown; frames for the list to appear; rows
 /// kept at most; frames before trying again after a failed run.
 const FRAMES_PER_TICK: u32 = 4;
@@ -42,7 +57,7 @@ const RETAKE: u32 = 40;
 /// Frames the date must stay unchanged before it is trusted (fades, travel).
 const STEADY: u32 = 8;
 
-struct Table { header: Vec<u16>, rows: Vec<Vec<u16>> }
+struct Table { header: Vec<u16>, rows: Vec<Vec<u16>>, colors: std::collections::HashMap<u16, u16> }
 
 struct Run {
     state: Vec<u8>,
@@ -59,6 +74,7 @@ struct Run {
     waited: u32,
     header: Vec<u16>,
     rows: Vec<Vec<u16>>,
+    colors: std::collections::HashMap<u16, u16>,
 }
 
 #[derive(Default)]
@@ -95,6 +111,40 @@ fn pointer(bus: &mem::MemMap) -> Option<i32> {
 /// BG2/BG3 of native rows `rows` (240 wide).
 fn layers(bus: &mem::MemMap, rows: std::ops::Range<usize>) -> Vec<u16> {
     rows.flat_map(|y| gba_core::ppu::native_layers(bus, 0b1100, y)).collect()
+}
+
+/// Forbidden red, recommended blue: the pills' palette banks (measured USA:
+/// 4 dark blue and 10 red for the law in force, 5 cyan and 9 tan for the
+/// others; text entries 1-3, pill entries 10-15, outline 11) trade places.
+/// The cyan forbidden pills become the red one lightened, with the tan
+/// pill's text.
+fn swapped_colors(palette: &[u8]) -> std::collections::HashMap<u16, u16> {
+    let c = |bank: usize, i: usize| half(palette, (bank * 16 + i) * 2) & 0x7fff;
+    let light = |v: u16| [0, 5, 10].iter().fold(0, |acc, &s| { let ch = (v >> s) & 31; acc | ((ch + (31 - ch) / 2) << s) });
+    let mut map = std::collections::HashMap::new();
+    for i in [1, 2, 3, 10, 11, 12, 13, 14, 15] {
+        map.insert(c(4, i), c(10, i));
+        map.insert(c(10, i), c(4, i));
+        map.insert(c(9, i), c(5, i));
+        map.insert(c(5, i), match i { 1..=3 => c(9, i), 11 => c(10, i), _ => light(c(10, i)) });
+    }
+    map
+}
+
+/// A row as the game draws it unmarked: its ▶ mark (left of the pill, which
+/// starts `INDENT` columns further right) taken out.
+fn unmarked(mut row: Vec<u16>) -> Vec<u16> {
+    // Unmarked rows start their pill at column 17 or 18; a marked row has
+    // nothing there (its mark is further right).
+    let mid = &row[8 * 240..9 * 240];
+    if mid[COLUMNS.0 - 2..COLUMNS.0 + 4].iter().all(|&p| p == TRANSPARENT) && mid.iter().any(|&p| p != TRANSPARENT) {
+        for line in row.chunks_exact_mut(240) {
+            line[..COLUMNS.0 + INDENT].fill(TRANSPARENT);
+            line.copy_within(INDENT.., 0);
+            line[240 - INDENT..].fill(TRANSPARENT);
+        }
+    }
+    row
 }
 
 /// The date shown on the map (the HUD's date box), as a hash.
@@ -136,7 +186,7 @@ impl Engine {
             if !steady || self.laws.date == Some(self.laws.shown.0) || bus.frames < self.laws.retry
                 || bus.world_hud.menu || !gba_core::ffta_battle_mouse::idle(bus) || self.gesture.is_some() { return Ok(()); }
             self.laws.run = Some(Run { state: savestate::snapshot(&self.machine), date: self.laws.shown.0, frame: 0, key: L, hold: 2, after: 2,
-                last: None, still: 0, taken: None, waited: 0, header: Vec::new(), rows: Vec::new() });
+                last: None, still: 0, taken: None, waited: 0, header: Vec::new(), rows: Vec::new(), colors: Default::default() });
         }
         let real = savestate::snapshot(&self.machine);
         let skip = self.machine.bus.skip_render;
@@ -169,7 +219,7 @@ impl Engine {
                 if run.waited > RETAKE { (run.key, run.hold, run.after, run.waited) = (DOWN, 2, 2, 0); }
                 continue;
             }
-            if run.rows.is_empty() { run.header = layers(bus, HEADER.0..HEADER.1); }
+            if run.rows.is_empty() { run.header = layers(bus, HEADER.0..HEADER.1); run.colors = swapped_colors(&bus.palette); }
             if run.rows.first() == Some(&band) || run.rows.len() >= MAX_ROWS { end = Some(true); break; }
             run.rows.push(band.clone());
             run.taken = Some((y, band));
@@ -179,16 +229,21 @@ impl Engine {
         savestate::restore(&mut self.machine, &real)?;
         self.machine.bus.skip_render = skip;
         match end {
-            Some(true) => { self.laws.table = Some(Table { header: run.header, rows: run.rows }); self.laws.date = Some(run.date); }
+            Some(true) => {
+                let rows = run.rows.into_iter().map(unmarked).collect();
+                self.laws.table = Some(Table { header: run.header, rows, colors: run.colors });
+                self.laws.date = Some(run.date);
+            }
             Some(false) => self.laws.retry = self.machine.bus.frames + RETRY,
             None => self.laws.run = Some(run),
         }
         Ok(())
     }
 
-    /// After the frame, on the portrait world map: the laws in force at the
-    /// top (the list's title bar and first row), the rest of the list under
-    /// them while open. Returns the button beside them, drawn.
+    /// After the frame, on the portrait world map: under the top of the frame
+    /// the list's title bar, the law in force and the next ones (the coming
+    /// ones indented), the rest under them while open, then the list's
+    /// button on the left. Returns the button and its row offset.
     pub(crate) fn laws_present(&mut self, dock: (i32, i32)) -> Option<(crate::game_buttons::Button, i32)> {
         self.laws.area = None;
         let bus = &self.machine.bus;
@@ -199,39 +254,44 @@ impl Engine {
         let ex = mem::extra() as i32;
         let colors = crate::engine::rgba_colors();
         let pixels = &mut self.pixels;
-        // Native pixels of `source` (240 wide) to texture row `top`, clipped to rows `clip`.
-        let mut put = |source: &[u16], top: i32, clip: (i32, i32)| {
+        // Native pixels of `source` (240 wide) to texture row `top`, `indent`
+        // columns to the right, clipped to rows `clip`.
+        let mut put = |source: &[u16], top: i32, indent: i32, clip: (i32, i32)| {
             for (i, &p) in source.iter().enumerate() {
-                let (x, y) = ((i % 240) as i32, top + (i / 240) as i32);
+                let (x, y) = ((i % 240) as i32 + indent, top + (i / 240) as i32);
                 if p == TRANSPARENT || !(COLUMNS.0 as i32..COLUMNS.1 as i32).contains(&x) || y < clip.0 || y >= clip.1 || !(0..rh).contains(&y) { continue; }
                 let tx = ex + x;
                 if !(0..rw as i32).contains(&tx) { continue; }
-                pixels[y as usize * rw + tx as usize] = colors[crate::world_map::faded(bus, p & 0x7fff, 0x0c) as usize];
+                let color = table.colors.get(&(p & 0x7fff)).copied().unwrap_or(p & 0x7fff);
+                pixels[y as usize * rw + tx as usize] = colors[crate::world_map::faded(bus, color, 0x0c) as usize];
             }
         };
+        let all = (i32::MIN, i32::MAX);
         let top = dock.0 + BANNER_TOP;
-        let header_rows = (HEADER.1 - HEADER.0) as i32;
-        put(&table.header, top, (i32::MIN, i32::MAX));
-        let first = top + header_rows;
-        put(&table.rows[0], first, (i32::MIN, i32::MAX));
-        if self.laws.open {
-            // Above the bottom HUD row.
-            let (a, b) = (first + ROW as i32, dock.1 - 160 + crate::game_buttons::ROW.0 - 2);
-            let content = (table.rows.len() as i32 - 1) * ROW as i32;
+        put(&table.header, top, 0, all);
+        let first = top + (HEADER.1 - HEADER.0) as i32;
+        let indent = |i: usize| if i == 0 { 0 } else { INDENT as i32 };
+        let shown = table.rows.len().min(SHOWN);
+        for (i, row) in table.rows.iter().enumerate().take(shown) { put(row, first + (i * ROW) as i32, indent(i), all); }
+        let mut end = first + (shown * ROW) as i32;
+        if self.laws.open && table.rows.len() > shown {
+            // Down to the button kept above the bottom HUD row.
+            let (a, b) = (end, dock.1 - 160 + crate::game_buttons::ROW.0 - 30);
+            let content = ((table.rows.len() - shown) * ROW) as i32;
             self.laws.max_scroll = (content - (b - a)).max(0) as f32;
             self.laws.scroll = self.laws.scroll.clamp(0., self.laws.max_scroll);
             let scroll = self.laws.scroll.round() as i32;
-            for (i, row) in table.rows.iter().enumerate().skip(1) {
-                put(row, a + (i as i32 - 1) * ROW as i32 - scroll, (a, b));
+            for (i, row) in table.rows.iter().enumerate().skip(shown) {
+                put(row, a + ((i - shown) * ROW) as i32 - scroll, indent(i), (a, b));
             }
-            self.laws.area = Some((a, b.min(a + content)));
+            end = b.min(a + content);
+            self.laws.area = Some((a, end));
         }
         self.laws.table = Some(table);
         let open = self.laws.open;
         let w = crate::game_buttons::width(&self.machine.bus.rom, LABEL);
-        let button = crate::game_buttons::Button { x: (120 - w / 2, 120 + w / 2), label: LABEL, key: KEY, active: open, top: true };
-        // In the top row, over the banner.
-        Some((button, dock.0 + 1 - crate::game_buttons::ROW.0))
+        let button = crate::game_buttons::Button { x: (BUTTON_X, BUTTON_X + w), label: LABEL, key: KEY, active: open, top: true };
+        Some((button, end + 1 - crate::game_buttons::ROW.0))
     }
 }
 
