@@ -573,7 +573,48 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
         compose(mem, dispcnt, line, &bg_lines, &bg_used, &obj_line, &obj_window, semi);
         mem.ffta_dialogue.wide_pass = false;
     }
+    if line==159 {redraw_sliding_shop_info(mem);}
     if let Some(start)=raster_timer {mem.ffta_dialogue.profile.raster_ns+=start.elapsed().as_nanos() as u64;}
+}
+/// While the Info window slides (Buy or Sell list steps 61, 63) the game
+/// moves its rows during the frame, its top row while the first lines are
+/// drawn. Once the frame is drawn, the panel is redrawn from its lower rows,
+/// drawn in their new place: only their shown columns, the top border the
+/// bottom one mirrored (the frame's tiles are vertical flips; no text there),
+/// and its edges, where shown, as on any body row.
+fn redraw_sliding_shop_info(mem:&mut MemMap) {
+    let Some([_,t,_,b])=mem.ffta_dialogue.shop_info else {return};
+    if mem.ffta_dialogue.extra.kind!=crate::ffta_dialogue::PanelKind::Info
+        || !matches!(crate::ffta_shop_mouse::handler_step(mem),Some((1|2,61|63))) {return;}
+    let (t,b)=(t.max(0) as usize,(b as usize).min(160));
+    if b<t+24 {return;}
+    let body=b-9;
+    let inset=crate::ffta_dialogue::LAYER_INSET as usize;
+    let width=crate::ffta_dialogue::LAYER_WIDTH;
+    let window=shop_info_left(mem,body).map(|l|l as usize);
+    let pixels=&mut mem.ffta_dialogue.extra.pixels;
+    let row=body*width+inset;
+    let Some(x0)=(128..240).find(|&x|pixels[row+x].visible()) else {return};
+    let x1=(x0..240).rev().find(|&x|pixels[row+x].visible()).unwrap_or(x0)+1;
+    for y in t..b {
+        pixels[y*width+inset+128..y*width+inset+x0].fill(Default::default());
+        pixels[y*width+inset+x1..y*width+inset+240].fill(Default::default());
+    }
+    for k in 0..8 {
+        let (to,from)=((t+k)*width+inset,(b-1-k)*width+inset);
+        pixels.copy_within(from+x0..from+x1,to+x0);
+    }
+    // Its edges beside the body: the window's own where shown, else (WIN1
+    // cutting it) rows still showing an edge there take the lower row's pixels.
+    if x1<x0+16 {return;}
+    let (dark,mid)=(pixels[(b-1)*width+inset+x0+4].color,pixels[(b-2)*width+inset+x0+4].color);
+    let edge=|p:&[crate::ffta_dialogue::UiPixel],at:usize,inward:usize|p[at].visible() && p[at].color==dark && p[inward].color==mid;
+    let own=[window==Some(x0),window.is_some_and(|l|l+104==x1)];
+    for y in t+8..body {
+        let line=y*width+inset;
+        if own[0] || (edge(pixels,line+x0,line+x0+1) && !edge(pixels,row+x0,row+x0+1)) {pixels.copy_within(row+x0..row+x0+8,line+x0);}
+        if own[1] || (edge(pixels,line+x1-1,line+x1-2) && !edge(pixels,row+x1-1,row+x1-2)) {pixels.copy_within(row+x1-8..row+x1,line+x1-8);}
+    }
 }
 
 /// Party screens in portrait (menu_screen.rs): composes the background alone
@@ -1062,8 +1103,9 @@ fn capture_dialogue_part_impl<const FAST:bool,const LEAN:bool>(mem:&mut MemMap, 
     let win0v=io16(mem,0x44);let win1v=io16(mem,0x46);
     let win0row=dispcnt&0x2000!=0 && in_window_range((win0v>>8)as u8,win0v as u8,line as u8);
     let win1row=dispcnt&0x4000!=0 && in_window_range((win1v>>8)as u8,win1v as u8,line as u8);
-    // Closing (Buy or Sell list step 63), the game moves the window's top row
-    // first, and the rest a step ahead of WIN1: rows still behind are not shown.
+    // Closing (Buy or Sell list step 63), the game moves the window's rows a
+    // step ahead of WIN1: rows still behind are not shown (and once the
+    // frame is drawn, `redraw_sliding_shop_info`).
     let info_clip=info.filter(|_|extra_panel && matches!(crate::ffta_shop_mouse::handler_step(mem),Some((1|2,63)))).map_or(128,|[_,t,_,_]|{
         let ahead=if win1h&255==240 {(win1h>>8) as i32+32}else{128};
         shop_info_left(mem,t as usize).unwrap_or(240).max(ahead)

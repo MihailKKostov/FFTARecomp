@@ -126,6 +126,26 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.43-android-preview
+
+**Category tabs work after item Info closes.** Item Info leaves WIN1 on but
+empty (240-240) when it closes, and the shop took any WIN1 for a window
+over the list (the quantity window), so tapping or swiping to another
+category did nothing until the shop was left. An empty WIN1 no longer
+counts. Measured: Info on and off, then a tap on the Items tab and a swipe
+to Armour, both change the list.
+
+**Item Info slides cleanly at the top.** While the window slides, the game
+moves it during the frame, its top lines while they are drawn, so a few
+of them showed it a step behind (a notch at its top corners, an edge
+beside the text). Once the frame is drawn, the panel is redrawn from its
+lower rows:
+- only their shown columns;
+- the top border is the bottom one mirrored (the frame's corner and border
+  tiles are vertical flips, with no text);
+- rows still showing an edge where the lower rows are cut by WIN1 take
+  the lower row's pixels there.
+
 ## 0.42-android-preview
 
 **Tapping an item selects it at once.** A tap on a shop list row moves the

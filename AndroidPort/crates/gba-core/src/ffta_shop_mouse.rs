@@ -57,8 +57,10 @@ fn context(mem:&MemMap)->Option<Context> {
     let x=*mem.ewram.get(base+0x78)? as i32*8;
     let y=*mem.ewram.get(base+0x79)? as i32*8;
     if x+count as i32*16>240 || y+16>160 {return None;}
-    // WIN1 frames the quantity window; the item Info window uses it too.
-    let overlay=half(&mem.io,0)?&0x4000!=0 && !crate::ppu::shop_info_open(mem);
+    // WIN1 frames the quantity window; the item Info window uses it too, and
+    // leaves it on, empty (240-240), after it closes.
+    let win1=half(&mem.io,0x42)?;
+    let overlay=half(&mem.io,0)?&0x4000!=0 && win1>>8<win1&255 && !crate::ppu::shop_info_open(mem);
     Some(Context{base,count,current,ids,x,y,overlay,cursor})
 }
 
@@ -384,7 +386,13 @@ mod tests {
         m.bus.ewram[0x5471]=1;assert!(select_category(&mut m.bus,2));
         assert_eq!(crate::ffta_battle_mouse::keys(&mut m.bus,0x3fd),0x3fd);
         assert!(!m.bus.ffta_battle_mouse.shop.pending());
+        // WIN1 on and empty (left after item Info closes): no window over the list.
         m.bus.io[..2].copy_from_slice(&0x5f40u16.to_le_bytes());
+        for(o,v)in[(0x42,0xf0f0u16),(0x46,0x0898)]{m.bus.io[o..o+2].copy_from_slice(&v.to_le_bytes());}
+        assert!(categories(&m.bus).is_some());
+        // The quantity window (WIN1 152-192 x 88-104) is over it.
+        for(o,v)in[(0x42,0x98c0u16),(0x46,0x5868)]{m.bus.io[o..o+2].copy_from_slice(&v.to_le_bytes());}
+        assert!(categories(&m.bus).is_none());
         assert!(!aim(&mut m.bus,56.,8.,true));assert!(scroll(&mut m.bus,false));
         m.bus.io[..2].copy_from_slice(&0x7f40u16.to_le_bytes());assert!(!scroll(&mut m.bus,false));
     }
