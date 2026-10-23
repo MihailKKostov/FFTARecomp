@@ -61,9 +61,10 @@ const RETRY: u64 = 120;
 const RETAKE: u32 = 40;
 /// Frames the date must stay unchanged before it is trusted (fades, travel).
 const STEADY: u32 = 8;
-/// The day of the month (EWRAM, measured USA: 1-30).
+/// The day of the month (EWRAM, measured USA: 1-20; day 20 is followed by
+/// day 1 of the next month).
 const DAY: usize = 0x2fbb;
-const MONTH_DAYS: i32 = 30;
+const MONTH_DAYS: i32 = 20;
 /// Frames after the day changed before the list is read (a day of travel
 /// takes about 60; the game ignores L meanwhile).
 const SETTLED: u64 = 90;
@@ -75,6 +76,10 @@ struct Table {
     /// The row the game marked (▶, its rotation), and the day it was read on.
     marked: Option<usize>,
     day: u8,
+    /// The law in force is drawn in the game's dark pills wherever it is in
+    /// the rotation: all rows are kept in the light ones (the first one read
+    /// turned light), and these turn light pill colours dark.
+    dark: std::collections::HashMap<u16, u16>,
 }
 
 struct Run {
@@ -93,6 +98,7 @@ struct Run {
     header: Vec<u16>,
     rows: Vec<Vec<u16>>,
     colors: std::collections::HashMap<u16, u16>,
+    dark: std::collections::HashMap<u16, u16>,
     day: u8,
 }
 
@@ -159,6 +165,13 @@ fn swapped_colors(palette: &[u8]) -> std::collections::HashMap<u16, u16> {
     map
 }
 
+/// The law in force's pills (banks 4 dark blue, 10 red) against the others'
+/// (5 cyan, 9 tan), text and pill entries: light to dark.
+fn dark_colors(palette: &[u8]) -> std::collections::HashMap<u16, u16> {
+    let c = |bank: usize, i: usize| half(palette, (bank * 16 + i) * 2) & 0x7fff;
+    [1, 2, 3, 10, 11, 12, 13, 14, 15].iter().flat_map(|&i| [(c(5, i), c(4, i)), (c(9, i), c(10, i))]).collect()
+}
+
 /// A row as the game draws it unmarked: its ▶ mark (left of the pill, which
 /// starts `INDENT` columns further right) taken out; true if it had one.
 fn unmarked(mut row: Vec<u16>) -> (Vec<u16>, bool) {
@@ -211,6 +224,8 @@ impl Laws {
         for (&from, &to) in &t.colors { w.u16(from); w.u16(to); }
         w.u32(t.marked.map_or(u32::MAX, |m| m as u32));
         w.u8(t.day);
+        w.u32(t.dark.len() as u32);
+        for (&from, &to) in &t.dark { w.u16(from); w.u16(to); }
     }
     pub fn load(r: &mut savestate::R) -> savestate::Res<Laws> {
         if !r.bool()? { return Ok(Laws::default()); }
@@ -223,7 +238,8 @@ impl Laws {
         let marked = r.u32()?;
         let marked = (marked != u32::MAX).then_some(marked as usize).filter(|&m| m < count);
         let day = r.u8()?;
-        Ok(Laws { table: Some(Table { header, rows, colors, marked, day }), date: Some(date), ..Laws::default() })
+        let dark = (0..r.u32()?.min(256)).map(|_| Ok((r.u16()?, r.u16()?))).collect::<savestate::Res<_>>()?;
+        Ok(Laws { table: Some(Table { header, rows, colors, marked, day, dark }), date: Some(date), ..Laws::default() })
     }
     fn current(&self) -> Option<&Table> { self.table.as_ref() }
     /// Rows the laws in force have moved on since the table was read: one a
@@ -231,7 +247,6 @@ impl Laws {
     fn target(&self) -> f32 {
         let (Some(t), Some(day)) = (&self.table, self.day) else { return 0. };
         let elapsed = (day as i32 - t.day as i32).rem_euclid(MONTH_DAYS) as usize;
-        if elapsed > MONTH_DAYS as usize / 2 { return 0.; }
         let n = t.rows.len();
         let ahead = match t.marked { Some(m) if m > 0 => elapsed.saturating_sub(n - m), _ => elapsed };
         ahead as f32
@@ -291,7 +306,7 @@ impl Engine {
             if !steady || self.laws.date == Some(self.laws.shown.0) || bus.frames < self.laws.retry
                 || bus.world_hud.menu || !gba_core::ffta_battle_mouse::idle(bus) || self.gesture.is_some() { return Ok(()); }
             self.laws.run = Some(Run { state: savestate::snapshot(&self.machine), date: self.laws.shown.0, frame: 0, key: L, hold: 2, after: 2,
-                last: None, still: 0, taken: None, waited: 0, header: Vec::new(), rows: Vec::new(), colors: Default::default(), day: 0 });
+                last: None, still: 0, taken: None, waited: 0, header: Vec::new(), rows: Vec::new(), colors: Default::default(), dark: Default::default(), day: 0 });
         }
         let real = savestate::snapshot(&self.machine);
         let skip = self.machine.bus.skip_render;
@@ -327,6 +342,7 @@ impl Engine {
             if run.rows.is_empty() {
                 run.header = layers(bus, HEADER.0..HEADER.1);
                 run.colors = swapped_colors(&bus.palette);
+                run.dark = dark_colors(&bus.palette);
                 run.day = bus.ewram.get(DAY).copied().unwrap_or(0);
             }
             if run.rows.first() == Some(&band) || run.rows.len() >= MAX_ROWS { end = Some(true); break; }
@@ -341,7 +357,11 @@ impl Engine {
             Some(true) => {
                 let (rows, marks): (Vec<_>, Vec<_>) = run.rows.into_iter().map(unmarked).unzip();
                 let marked = marks.iter().position(|&m| m);
-                self.laws.take(Table { header: run.header, rows, colors: run.colors, marked, day: run.day });
+                let mut rows: Vec<Vec<u16>> = rows;
+                // The law in force, read in its dark pills, kept light like the rest.
+                let light: std::collections::HashMap<u16, u16> = run.dark.iter().map(|(&l, &d)| (d, l)).collect();
+                if let Some(first) = rows.first_mut() { for p in first.iter_mut() { if let Some(&l) = light.get(&(*p & 0x7fff)) { *p = l; } } }
+                self.laws.take(Table { header: run.header, rows, colors: run.colors, marked, day: run.day, dark: run.dark });
                 self.laws.date = Some(run.date);
             }
             Some(false) => self.laws.retry = self.machine.bus.frames + RETRY,
@@ -367,19 +387,21 @@ impl Engine {
         let pixels = &mut self.pixels;
         // Native pixels of `source` (240 wide) to texture row `top`, `indent`
         // columns to the right, clipped to rows `clip`.
-        let mut put = |source: &[u16], top: i32, indent: i32, clip: (i32, i32)| {
+        let mut put = |source: &[u16], top: i32, indent: i32, clip: (i32, i32), in_force: bool| {
             for (i, &p) in source.iter().enumerate() {
                 let (x, y) = ((i % 240) as i32 + indent, top + (i / 240) as i32);
                 if p == TRANSPARENT || !(COLUMNS.0 as i32..COLUMNS.1 as i32).contains(&x) || y < clip.0 || y >= clip.1 || !(0..rh).contains(&y) { continue; }
                 let tx = ex + x;
                 if !(0..rw as i32).contains(&tx) { continue; }
-                let color = table.colors.get(&(p & 0x7fff)).copied().unwrap_or(p & 0x7fff);
+                let raw = p & 0x7fff;
+                let raw = if in_force { table.dark.get(&raw).copied().unwrap_or(raw) } else { raw };
+                let color = table.colors.get(&raw).copied().unwrap_or(raw);
                 pixels[y as usize * rw + tx as usize] = colors[crate::world_map::faded(bus, color, 0x0c) as usize];
             }
         };
         let all = (i32::MIN, i32::MAX);
         let top = dock.0 + BANNER_TOP;
-        put(&table.header, top, 0, all);
+        put(&table.header, top, 0, all, false);
         let first = top + (HEADER.1 - HEADER.0) as i32;
         let n = table.rows.len();
         let row_at = |i: i64| &table.rows[i.rem_euclid(n as i64) as usize];
@@ -393,7 +415,9 @@ impl Engine {
         // A row's indent follows its place: none in the first, 16 from the second.
         for j in 0..=shown as i64 {
             let y = first + j as i32 * ROW as i32 - part;
-            put(row_at(base + j), y, ((y - first) * INDENT as i32 / ROW as i32).clamp(0, INDENT as i32), (first, end));
+            // The row in the first place (more than half in it) is the law in force.
+            let in_force = (y - first).abs() * 2 < ROW as i32 || (j == 0 && part * 2 == ROW as i32);
+            put(row_at(base + j), y, ((y - first) * INDENT as i32 / ROW as i32).clamp(0, INDENT as i32), (first, end), in_force);
         }
         if self.laws.open && n > shown {
             // Down to the bottom HUD row.
@@ -403,7 +427,7 @@ impl Engine {
             self.laws.scroll = self.laws.scroll.clamp(0., self.laws.max_scroll);
             let scroll = self.laws.scroll.round() as i32;
             for i in shown..n {
-                put(row_at(base + i as i64), a + ((i - shown) * ROW) as i32 - scroll, INDENT as i32, (a, b));
+                put(row_at(base + i as i64), a + ((i - shown) * ROW) as i32 - scroll, INDENT as i32, (a, b), false);
             }
             end = b.min(a + content);
             self.laws.area = Some((a, end));
@@ -416,7 +440,7 @@ impl Engine {
 mod tests {
     use super::*;
     fn table(names: &[u16], marked: Option<usize>, day: u8) -> Table {
-        Table { header: vec![7; 240 * (HEADER.1 - HEADER.0)], rows: names.iter().map(|&n| vec![n; 240 * ROW]).collect(), colors: [(1, 2)].into(), marked, day }
+        Table { header: vec![7; 240 * (HEADER.1 - HEADER.0)], rows: names.iter().map(|&n| vec![n; 240 * ROW]).collect(), colors: [(1, 2)].into(), marked, day, dark: [(3, 4)].into() }
     }
     fn settle(laws: &mut Laws) { for _ in 0..200 { laws.follow(); } }
     #[test]
@@ -452,6 +476,17 @@ mod tests {
         assert_eq!(laws.pos, 0.);
     }
     #[test]
+    fn the_laws_keep_moving_on_into_the_next_month() {
+        // Read on day 18 (measured: day 20 is followed by day 1).
+        let mut laws = Laws::default();
+        laws.take(table(&(10..30).collect::<Vec<_>>(), Some(0), 18));
+        for (day, pos) in [(19, 1.), (20, 2.), (1, 3.), (2, 4.), (5, 7.)] {
+            laws.day = Some(day);
+            settle(&mut laws);
+            assert_eq!(laws.pos, pos, "day {day}");
+        }
+    }
+    #[test]
     fn the_laws_survive_the_resume_state() {
         let mut laws = Laws::default();
         laws.take(table(&[10, 11, 12], Some(2), 7));
@@ -460,7 +495,7 @@ mod tests {
         laws.save(&mut w);
         let back = Laws::load(&mut savestate::R::new(&w.0)).unwrap();
         let t = back.table.as_ref().unwrap();
-        assert_eq!((back.date, t.rows.len(), t.rows[2][0], t.colors.get(&1), t.marked, t.day), (Some(42), 3, 12, Some(&2), Some(2), 7));
+        assert_eq!((back.date, t.rows.len(), t.rows[2][0], t.colors.get(&1), t.marked, t.day, t.dark.get(&3)), (Some(42), 3, 12, Some(&2), Some(2), 7, Some(&4)));
         // Nothing kept: nothing shown.
         let mut w = savestate::W(Vec::new());
         Laws::default().save(&mut w);

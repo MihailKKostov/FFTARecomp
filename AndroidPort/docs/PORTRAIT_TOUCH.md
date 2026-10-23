@@ -126,6 +126,22 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.51-android-preview
+
+**Laws across a month change.** A month has 20 days (measured: EWRAM
+0x2fbb goes from 20 to 1), not 30. With 30, the days passed since the laws
+were read came out wrong once a month turned: 11 too many, or none at all
+(a guard against long gaps), and the shown laws went back to the law in
+force when they were read and stayed there until read anew. Now the
+rotation moves on one law a day through month changes. Measured: 30 one-day
+trips, days 1 to 20 and on into the next month; the shown laws agreed with
+the game's own list read on every arrival.
+
+**The law in force is the one on top.** The game draws the law in force in
+dark pills. That row is now kept in the light pills like the others, and
+whichever row is in the first place is drawn dark: before, the row read as
+the law in force kept its dark pills wherever the rotation put it.
+
 ## 0.50-android-preview
 
 **No blind A where the player chooses.** Touch-only portrait: a tap that
