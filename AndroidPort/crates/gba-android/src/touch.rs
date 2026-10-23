@@ -261,6 +261,7 @@ impl Engine {
                         nx+=if b[0]+b[2]>=240{d}else{-d};
                     }
                 }
+                if self.touch_enabled && self.machine.bus.ffta_dialogue.docked && self.notice_tap(nx,ny) {return;}
                 if self.town_buttons() && self.pub_tap(nx,ny) {return;}
                 if self.shop_list_tap(nx,ny) {return;}
                 handled=battle::aim(&mut self.machine.bus,nx,ny,true);
@@ -286,7 +287,8 @@ impl Engine {
                 },
                 None=>ny,
             };
-            if let Some(keys)=self.usa.then(||crate::title_touch::keys(&self.machine.bus,nx,ny)).flatten(){
+            if self.touch_enabled && self.machine.bus.ffta_dialogue.docked && self.notice_tap(nx,ny) {return;}
+            if let Some(keys)=self.usa.then(||crate::title_touch::keys(&self.machine.bus,nx,ny).or_else(||crate::title_touch::slot_keys(&self.machine.bus,nx,ny))).flatten(){
                 self.mouse.cancel();
                 if !keys.is_empty(){battle::press_sequence(&mut self.machine.bus,&keys);}
                 #[cfg(target_os="android")]
@@ -327,6 +329,7 @@ impl Engine {
     pub(crate) fn press_button(&mut self,key:u16){
         if key==crate::engine::PARTY_CLOSE {self.leave_party();}
         else if key==crate::pub_touch::CLOSE_RUMOR {self.close_rumor();}
+        else if key==crate::pub_touch::YES {self.notice_yes();}
         else if key==0x3fd && gba_core::ppu::shop_info_open(&self.machine.bus) {battle::press_sequence(&mut self.machine.bus,&[0x2ff,0x3fd]);}
         else {battle::press(&mut self.machine.bus,key);}
     }

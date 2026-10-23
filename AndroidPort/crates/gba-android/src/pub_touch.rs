@@ -52,14 +52,25 @@ pub fn mission_pages(bus: &MemMap) -> bool {
 }
 
 /// The Yes/No line of a notice: the game's ring left of Yes (native x, y).
+/// The title is on BG3 in town scenes, BG1 on the title's file screens.
 pub fn notice(bus: &MemMap) -> Option<(i32, i32)> {
-    let cnt = half(&bus.io, 0x0e);
-    if cnt & 0x8000 != 0 || half(&bus.io, 0x1c) & 511 != 0 || half(&bus.io, 0x1e) & 511 != 0 { return None; }
-    let base = ((cnt >> 8) & 31) as usize * 0x800;
-    let entry = |col: usize, row: usize| half(&bus.vram, base + (row * 32 + col) * 2);
-    (0..18).find_map(|row| (0..26).find(|&col| (0..4).all(|i| entry(col + i, row) == 0xb04a + i as u16))
-        .map(|col| (col as i32 * 8 + 3, row as i32 * 8 + 28)))
+    (1..4).find_map(|bg| {
+        let cnt = half(&bus.io, 8 + bg * 2);
+        // Not 512 wide (a 256x512 map holds its first 32 rows first).
+        if cnt & 0x4000 != 0 || half(&bus.io, 0x10 + bg * 4) & 511 != 0 || half(&bus.io, 0x12 + bg * 4) & 511 != 0 { return None; }
+        let base = ((cnt >> 8) & 31) as usize * 0x800;
+        let entry = |col: usize, row: usize| half(&bus.vram, base + (row * 32 + col) * 2);
+        (0..18).find_map(|row| (0..26).find(|&col| (0..4).all(|i| entry(col + i, row) == 0xb04a + i as u16))
+            .map(|col| (col as i32 * 8 + 3, row as i32 * 8 + 28)))
+    })
 }
+/// The notice's ring is on No (some notices start there and move with
+/// Left/Right; the pub's stays on Yes).
+fn ring_on_no(bus: &MemMap, (x, y): (i32, i32)) -> bool {
+    sprites(bus).any(|(sx, sy, a0, a2)| sy == y && sx > x + 20 && sx < x + 80 && a0 >> 14 == 0 && (0x120..=0x127).contains(&(a2 & 0x3ff)))
+}
+/// Notice buttons: Yes chooses Yes wherever the ring is.
+pub(crate) const YES: u16 = 4;
 
 /// A rumor's text is shown.
 pub fn rumor_text(bus: &MemMap) -> bool {
@@ -76,7 +87,6 @@ impl Engine {
     pub(crate) fn pub_buttons(&self) -> Option<Vec<crate::game_buttons::Button>> {
         use crate::game_buttons::row;
         let bus = &self.machine.bus;
-        if notice(bus).is_some() { return Some(row(&bus.rom, 236, &[("Yes", A, false), ("No", B, false)])); }
         if rumor_text(bus) { return Some(row(&bus.rom, 236, &[("Return", CLOSE_RUMOR, false)])); }
         if mission_pages(bus) { return Some(row(&bus.rom, 236, &[("OK", A, false), ("Return", B, false)])); }
         None
@@ -85,13 +95,9 @@ impl Engine {
     /// waiting for a button. True when it was taken.
     pub(crate) fn pub_tap(&mut self, x: f32, y: f32) -> bool {
         let bus = &mut self.machine.bus;
-        let key = if let Some((rx, ry)) = notice(bus) {
-            // "Yes" right of the ring, "No" after it; the rest of the notice does nothing.
-            let row = y >= (ry - 6) as f32 && y < (ry + 14) as f32;
-            if row && x >= (rx - 4) as f32 && x < (rx + 36) as f32 { Some(A) }
-            else if row && x >= (rx + 36) as f32 && x < (rx + 80) as f32 { Some(B) }
-            else { None }
-        } else if mission_pages(bus) {
+        if self.notice_tap(x, y) { return true; }
+        let bus = &mut self.machine.bus;
+        let key = if mission_pages(bus) {
             // The page arrows (and the corners around them).
             if y < 28. && x < 48. { Some(LEFT) } else if y < 28. && x >= 192. { Some(RIGHT) } else { None }
         } else if continue_arrow(bus) || rumor_text(bus) {
@@ -101,6 +107,24 @@ impl Engine {
         };
         if let Some(key) = key { self.mouse.cancel(); battle::press(&mut self.machine.bus, key); }
         true
+    }
+    /// A tap on a notice: "Yes" right of the ring, "No" after it; the rest of
+    /// the notice does nothing. False when no notice is shown.
+    pub(crate) fn notice_tap(&mut self, x: f32, y: f32) -> bool {
+        let Some((rx, ry)) = notice(&self.machine.bus) else { return false };
+        let row = y >= (ry - 6) as f32 && y < (ry + 14) as f32;
+        if row && x >= (rx - 4) as f32 && x < (rx + 36) as f32 { self.notice_yes(); }
+        else if row && x >= (rx + 36) as f32 && x < (rx + 80) as f32 { self.mouse.cancel(); battle::press(&mut self.machine.bus, B); }
+        true
+    }
+    /// Chooses Yes on the notice shown: the ring to Yes first if it is on No.
+    pub(crate) fn notice_yes(&mut self) {
+        self.mouse.cancel();
+        let bus = &mut self.machine.bus;
+        match notice(bus) {
+            Some(at) if ring_on_no(bus, at) => { battle::press_sequence(bus, &[LEFT, A]); }
+            _ => { battle::press(bus, A); }
+        }
     }
     /// Closes a rumor's text (`CLOSE_RUMOR`): A, page by page, while it shows.
     pub(crate) fn close_rumor(&mut self) { self.rumor_close = Some(self.machine.bus.frames + 600); }

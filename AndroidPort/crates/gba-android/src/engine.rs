@@ -235,6 +235,7 @@ impl Engine {
         let bus=&self.machine.bus;
         if !self.touch_enabled || !bus.ffta_dialogue.docked || self.padded || !crate::game_buttons::available(&bus.rom) {return Vec::new();}
         let (start,back)=(0x3f7,0x3fd);
+        if crate::pub_touch::notice(bus).is_some() {return row(&bus.rom,236,&[("Yes",crate::pub_touch::YES,false),("No",back,false)]);}
         if bus.world_hud.map_frame {
             let open=bus.world_hud.menu;
             let w=crate::game_buttons::width(&bus.rom,"Menu");

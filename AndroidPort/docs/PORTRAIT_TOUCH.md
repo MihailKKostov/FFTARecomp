@@ -126,6 +126,24 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.55-android-preview
+
+**Loading a save by touch.**
+- Title menu: each row's tap band is its own (New Game 66-85, Saved Game
+  85-106, Color Mode 106-126). Before, the bands overlapped and New Game
+  won: a tap at the top of Saved Game started a new game.
+- File slots ("Pick slot to load.", and Resume Battle's single slot; BG
+  ad0b ac09 2b0a 2a08, the pointer an 8x8 sprite at Y 69, X 16 or 128,
+  tiles 0x125-0x127 as it shines): a tap on the other slot selects it, a
+  tap on the selected one loads it. Before, taps there did nothing.
+- Notices anywhere (not only in town scenes): the NOTICE title is found on
+  BG1-3 (BG1, 256x512, on the file screens). Some start on No and move
+  with Left/Right ("Loading erases previously saved game." then "OK?"):
+  Yes, by tap or button, moves the ring to Yes first. No is B.
+Measured, touch only, with a save mid-battle: title, Saved Game, Load,
+slot 1: the world map; Resume Battle, the slot, the notice's Yes: the
+battle.
+
 ## 0.54-android-preview
 
 **Top speech bubbles stay on top.** A bubble anchored to a screen edge in
