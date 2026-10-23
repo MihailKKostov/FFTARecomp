@@ -15,9 +15,14 @@
 //! BG2/BG3 are read, so the rows come without the map. The run is made again
 //! when the date shown changes.
 //!
-//! The laws read last stay shown while the date changes (travelling). When
-//! the list read anew is the old one turned on by some laws, the shown laws
-//! scroll up to the new one in force, each row's indent following its place.
+//! The game's ▶ marks the row its law rotation is at; it moves on one row a
+//! day, and the law in force follows it (measured: ▶ on the 20th row, Items,
+//! on day 1 with Shell in force, the first row; Shell on day 2, Protect on
+//! day 4 with ▶ on it). So while travelling, each day that passes (EWRAM
+//! 0x2fbb, the day of the month) moves the shown laws on at once, scrolling
+//! while the party moves; the law in force stays until ▶ reaches it. Once the
+//! map waits for input again the list is read anew and the shown laws only
+//! correct themselves if the guess was wrong.
 //!
 //! Shown: the title bar, the law in force and the next two always; the rest
 //! under them while the list is open. The law in force is flush left, the
@@ -55,15 +60,27 @@ pub(crate) const BANNER_ROWS: i32 = BANNER_TOP + (HEADER.1 - HEADER.0) as i32 + 
 const FRAMES_PER_TICK: u32 = 4;
 const OPEN_FRAMES: u32 = 90;
 /// Native rows a frame the shown laws scroll by when the laws in force move on.
-const SCROLL_SPEED: f32 = 1.;
 const MAX_ROWS: usize = 48;
 const RETRY: u64 = 120;
 /// Frames after Down without a new row before Down is pressed again.
 const RETAKE: u32 = 40;
 /// Frames the date must stay unchanged before it is trusted (fades, travel).
 const STEADY: u32 = 8;
+/// The day of the month (EWRAM, measured USA: 1-30).
+const DAY: usize = 0x2fbb;
+const MONTH_DAYS: i32 = 30;
+/// Frames after the day changed before the list is read (a day of travel
+/// takes about 60; the game ignores L meanwhile).
+const SETTLED: u64 = 90;
 
-struct Table { header: Vec<u16>, rows: Vec<Vec<u16>>, colors: std::collections::HashMap<u16, u16> }
+struct Table {
+    header: Vec<u16>,
+    rows: Vec<Vec<u16>>,
+    colors: std::collections::HashMap<u16, u16>,
+    /// The row the game marked (▶, its rotation), and the day it was read on.
+    marked: Option<usize>,
+    day: u8,
+}
 
 struct Run {
     state: Vec<u8>,
@@ -81,6 +98,7 @@ struct Run {
     header: Vec<u16>,
     rows: Vec<Vec<u16>>,
     colors: std::collections::HashMap<u16, u16>,
+    day: u8,
 }
 
 #[derive(Default)]
@@ -91,9 +109,11 @@ pub struct Laws {
     shown: (u64, u32),
     run: Option<Run>,
     retry: u64,
-    /// The laws in force moved on: the rows that went (above the new first
-    /// row) and how far the shown laws have scrolled to it (native rows).
-    advance: Option<(Vec<Vec<u16>>, f32)>,
+    /// Rows of the table the shown laws start at (scrolling between whole
+    /// rows), the day of the month now and the frame it last changed.
+    pos: f32,
+    day: Option<u8>,
+    day_changed: u64,
     /// The whole list is shown, scrolled by `scroll` native rows.
     pub open: bool,
     pub scroll: f32,
@@ -141,19 +161,20 @@ fn swapped_colors(palette: &[u8]) -> std::collections::HashMap<u16, u16> {
 }
 
 /// A row as the game draws it unmarked: its ▶ mark (left of the pill, which
-/// starts `INDENT` columns further right) taken out.
-fn unmarked(mut row: Vec<u16>) -> Vec<u16> {
+/// starts `INDENT` columns further right) taken out; true if it had one.
+fn unmarked(mut row: Vec<u16>) -> (Vec<u16>, bool) {
     // Unmarked rows start their pill at column 17 or 18; a marked row has
     // nothing there (its mark is further right).
     let mid = &row[8 * 240..9 * 240];
-    if mid[COLUMNS.0 - 2..COLUMNS.0 + 4].iter().all(|&p| p == TRANSPARENT) && mid.iter().any(|&p| p != TRANSPARENT) {
+    let marked = mid[COLUMNS.0 - 2..COLUMNS.0 + 4].iter().all(|&p| p == TRANSPARENT) && mid.iter().any(|&p| p != TRANSPARENT);
+    if marked {
         for line in row.chunks_exact_mut(240) {
             line[..COLUMNS.0 + INDENT].fill(TRANSPARENT);
             line.copy_within(INDENT.., 0);
             line[240 - INDENT..].fill(TRANSPARENT);
         }
     }
-    row
+    (row, marked)
 }
 
 /// The date shown on the map (the HUD's date box), as a hash.
@@ -189,6 +210,8 @@ impl Laws {
         for row in &t.rows { put_pixels(w, row); }
         w.u32(t.colors.len() as u32);
         for (&from, &to) in &t.colors { w.u16(from); w.u16(to); }
+        w.u32(t.marked.map_or(u32::MAX, |m| m as u32));
+        w.u8(t.day);
     }
     pub fn load(r: &mut savestate::R) -> savestate::Res<Laws> {
         if !r.bool()? { return Ok(Laws::default()); }
@@ -198,22 +221,52 @@ impl Laws {
         if count == 0 || count > MAX_ROWS { return Err("Bad law count".into()); }
         let rows = (0..count).map(|_| get_pixels(r, 240 * ROW)).collect::<savestate::Res<Vec<_>>>()?;
         let colors = (0..r.u32()?.min(256)).map(|_| Ok((r.u16()?, r.u16()?))).collect::<savestate::Res<_>>()?;
-        Ok(Laws { table: Some(Table { header, rows, colors }), date: Some(date), ..Laws::default() })
+        let marked = r.u32()?;
+        let marked = (marked != u32::MAX).then_some(marked as usize).filter(|&m| m < count);
+        let day = r.u8()?;
+        Ok(Laws { table: Some(Table { header, rows, colors, marked, day }), date: Some(date), ..Laws::default() })
     }
-    /// The banner and list are for the date shown now.
     fn current(&self) -> Option<&Table> { self.table.as_ref() }
-    /// Takes the list read anew: when it is the old one turned on by some
-    /// laws (most rows in the same order), the shown laws scroll to it.
+    /// Rows the laws in force have moved on since the table was read: one a
+    /// day once ▶ is on the law in force (until then the law in force stays).
+    fn target(&self) -> f32 {
+        let (Some(t), Some(day)) = (&self.table, self.day) else { return 0. };
+        let elapsed = (day as i32 - t.day as i32).rem_euclid(MONTH_DAYS) as usize;
+        if elapsed > MONTH_DAYS as usize / 2 { return 0.; }
+        let n = t.rows.len();
+        let ahead = match t.marked { Some(m) if m > 0 => elapsed.saturating_sub(n - m), _ => elapsed };
+        ahead as f32
+    }
+    /// Takes the list read anew. When it is the old one turned on by some laws
+    /// (most rows in the same order), the shown laws keep their place and move
+    /// on to it from there (no jump where the guess was right).
     fn take(&mut self, new: Table) {
-        self.advance = self.table.as_ref().and_then(|old| {
+        let turned = self.table.as_ref().and_then(|old| {
             let n = old.rows.len();
             if n != new.rows.len() || n < 2 { return None; }
             // Rows 1.. of the new list against the old one turned on by k.
             let turned = |k: usize| (1..n).filter(|&i| new.rows[i] == old.rows[(i + k) % n]).count();
-            let (k, same) = (1..n).map(|k| (k, turned(k))).max_by_key(|&(_, c)| c)?;
-            (same * 2 >= n && turned(0) < same).then(|| (old.rows[..k].to_vec(), 0.))
+            let (k, same) = (0..n).map(|k| (k, turned(k))).max_by_key(|&(_, c)| c)?;
+            (same * 2 >= n).then_some(k)
         });
+        self.pos = match turned {
+            // Seen from the new list, rows back (or ahead) of its first row.
+            Some(k) => {
+                let n = new.rows.len() as f32;
+                let p = (self.pos - k as f32).rem_euclid(n);
+                if p > n / 2. { p - n } else { p }
+            }
+            None => 0.,
+        };
         self.table = Some(new);
+    }
+    /// Once a frame shown: the shown laws scroll toward the laws in force,
+    /// a row in 16 frames (faster when further behind).
+    fn follow(&mut self) {
+        let target = self.target();
+        let d = target - self.pos;
+        let step = (1. / ROW as f32).max(d.abs() / 8.);
+        self.pos = if d.abs() <= step { target } else { self.pos + step * d.signum() };
     }
 }
 
@@ -231,12 +284,15 @@ impl Engine {
             self.laws.shown = (d, n);
         }
         if bus.world_hud.menu { self.laws.open = false; }
-        let steady = self.laws.shown.1 >= STEADY;
+        // The day passing (travelling) moves the shown laws on.
+        let day = bus.ewram.get(DAY).copied().filter(|d| (1..=MONTH_DAYS as u8).contains(d));
+        if day != self.laws.day { self.laws.day = day; self.laws.day_changed = bus.frames; }
+        let steady = self.laws.shown.1 >= STEADY && bus.frames >= self.laws.day_changed + SETTLED;
         if self.laws.run.is_none() {
             if !steady || self.laws.date == Some(self.laws.shown.0) || bus.frames < self.laws.retry
                 || bus.world_hud.menu || !gba_core::ffta_battle_mouse::idle(bus) || self.gesture.is_some() { return Ok(()); }
             self.laws.run = Some(Run { state: savestate::snapshot(&self.machine), date: self.laws.shown.0, frame: 0, key: L, hold: 2, after: 2,
-                last: None, still: 0, taken: None, waited: 0, header: Vec::new(), rows: Vec::new(), colors: Default::default() });
+                last: None, still: 0, taken: None, waited: 0, header: Vec::new(), rows: Vec::new(), colors: Default::default(), day: 0 });
         }
         let real = savestate::snapshot(&self.machine);
         let skip = self.machine.bus.skip_render;
@@ -269,7 +325,11 @@ impl Engine {
                 if run.waited > RETAKE { (run.key, run.hold, run.after, run.waited) = (DOWN, 2, 2, 0); }
                 continue;
             }
-            if run.rows.is_empty() { run.header = layers(bus, HEADER.0..HEADER.1); run.colors = swapped_colors(&bus.palette); }
+            if run.rows.is_empty() {
+                run.header = layers(bus, HEADER.0..HEADER.1);
+                run.colors = swapped_colors(&bus.palette);
+                run.day = bus.ewram.get(DAY).copied().unwrap_or(0);
+            }
             if run.rows.first() == Some(&band) || run.rows.len() >= MAX_ROWS { end = Some(true); break; }
             run.rows.push(band.clone());
             run.taken = Some((y, band));
@@ -280,8 +340,9 @@ impl Engine {
         self.machine.bus.skip_render = skip;
         match end {
             Some(true) => {
-                let rows = run.rows.into_iter().map(unmarked).collect();
-                self.laws.take(Table { header: run.header, rows, colors: run.colors });
+                let (rows, marks): (Vec<_>, Vec<_>) = run.rows.into_iter().map(unmarked).unzip();
+                let marked = marks.iter().position(|&m| m);
+                self.laws.take(Table { header: run.header, rows, colors: run.colors, marked, day: run.day });
                 self.laws.date = Some(run.date);
             }
             Some(false) => self.laws.retry = self.machine.bus.frames + RETRY,
@@ -296,6 +357,7 @@ impl Engine {
     /// button on the left. Returns the button and its row offset.
     pub(crate) fn laws_present(&mut self, dock: (i32, i32)) -> Option<(crate::game_buttons::Button, i32)> {
         self.laws.area = None;
+        self.laws.follow();
         let bus = &self.machine.bus;
         if !bus.world_hud.map_frame || bus.world_hud.menu { return None; }
         self.laws.current()?;
@@ -320,32 +382,28 @@ impl Engine {
         let top = dock.0 + BANNER_TOP;
         put(&table.header, top, 0, all);
         let first = top + (HEADER.1 - HEADER.0) as i32;
-        let indent = |i: usize| if i == 0 { 0 } else { INDENT as i32 };
-        let shown = table.rows.len().min(SHOWN);
+        let n = table.rows.len();
+        let row_at = |i: i64| &table.rows[i.rem_euclid(n as i64) as usize];
+        let shown = n.min(SHOWN);
         let mut end = first + (shown * ROW) as i32;
-        if self.laws.open { self.laws.advance = None; }
-        if let Some((gone, scrolled)) = &mut self.laws.advance {
-            // The rows that went, then the new ones, scrolling up into place;
-            // a row's indent follows its place (none in the first).
-            *scrolled = (*scrolled + SCROLL_SPEED).min((gone.len() * ROW) as f32);
-            let s = scrolled.round() as i32;
-            for (j, row) in gone.iter().chain(&table.rows).enumerate().take(gone.len() + shown) {
-                let y = first + (j * ROW) as i32 - s;
-                put(row, y, ((y - first) * INDENT as i32 / ROW as i32).clamp(0, INDENT as i32), (first, end));
-            }
-            if *scrolled >= (gone.len() * ROW) as f32 { self.laws.advance = None; }
-        } else {
-            for (i, row) in table.rows.iter().enumerate().take(shown) { put(row, first + (i * ROW) as i32, indent(i), all); }
+        // From the row the laws have scrolled to: whole rows and the part between.
+        let base = self.laws.pos.floor();
+        let part = ((self.laws.pos - base) * ROW as f32).round() as i32;
+        let base = base as i64;
+        // A row's indent follows its place: none in the first, 16 from the second.
+        for j in 0..=shown as i64 {
+            let y = first + j as i32 * ROW as i32 - part;
+            put(row_at(base + j), y, ((y - first) * INDENT as i32 / ROW as i32).clamp(0, INDENT as i32), (first, end));
         }
-        if self.laws.open && table.rows.len() > shown {
+        if self.laws.open && n > shown {
             // Down to the button kept above the bottom HUD row.
             let (a, b) = (end, dock.1 - 160 + crate::game_buttons::ROW.0 - 30);
             let content = ((table.rows.len() - shown) * ROW) as i32;
             self.laws.max_scroll = (content - (b - a)).max(0) as f32;
             self.laws.scroll = self.laws.scroll.clamp(0., self.laws.max_scroll);
             let scroll = self.laws.scroll.round() as i32;
-            for (i, row) in table.rows.iter().enumerate().skip(shown) {
-                put(row, a + ((i - shown) * ROW) as i32 - scroll, indent(i), (a, b));
+            for i in shown..n {
+                put(row_at(base + i as i64), a + ((i - shown) * ROW) as i32 - scroll, INDENT as i32, (a, b));
             }
             end = b.min(a + content);
             self.laws.area = Some((a, end));
@@ -361,35 +419,52 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn table(names: &[u16]) -> Table {
-        Table { header: vec![7; 240 * (HEADER.1 - HEADER.0)], rows: names.iter().map(|&n| vec![n; 240 * ROW]).collect(), colors: [(1, 2)].into() }
+    fn table(names: &[u16], marked: Option<usize>, day: u8) -> Table {
+        Table { header: vec![7; 240 * (HEADER.1 - HEADER.0)], rows: names.iter().map(|&n| vec![n; 240 * ROW]).collect(), colors: [(1, 2)].into(), marked, day }
     }
+    fn settle(laws: &mut Laws) { for _ in 0..200 { laws.follow(); } }
     #[test]
-    fn a_turned_list_scrolls_by_the_laws_that_went() {
+    fn the_laws_move_on_a_row_a_day_once_the_mark_is_on_the_law_in_force() {
+        // Day 1: Shell (10) in force, ▶ on the last row: it reaches Shell on day 2.
         let mut laws = Laws::default();
-        laws.take(table(&[10, 11, 12, 13, 14, 15]));
-        assert!(laws.advance.is_none());
-        // The law in force looks different there (its own colours): the rest decides.
-        laws.take(table(&[12, 13, 14, 15, 99, 11]));
-        let (gone, scrolled) = laws.advance.as_ref().unwrap();
-        assert_eq!((gone.len(), *scrolled), (2, 0.));
-        assert_eq!(gone[0][0], 10);
-        // Read again unchanged, or a different list: no scroll.
-        laws.take(table(&[12, 13, 14, 15, 99, 11]));
-        assert!(laws.advance.is_none());
-        laws.take(table(&[1, 2, 3, 4, 5, 6]));
-        assert!(laws.advance.is_none());
+        laws.take(table(&[10, 11, 12, 13, 14, 15], Some(5), 1));
+        laws.day = Some(1);
+        settle(&mut laws);
+        assert_eq!(laws.pos, 0.);
+        for (day, pos) in [(2, 0.), (3, 1.), (4, 2.)] {
+            laws.day = Some(day);
+            laws.follow();
+            // Scrolling meanwhile, not there at once.
+            assert!(pos == 0. || laws.pos < pos);
+            settle(&mut laws);
+            assert_eq!(laws.pos, pos);
+        }
+        // Read anew on day 4 (Protect, 12, in force and marked): no jump.
+        laws.take(table(&[12, 13, 14, 15, 99, 11], Some(0), 4));
+        assert_eq!(laws.pos, 0.);
+        laws.day = Some(5);
+        settle(&mut laws);
+        assert_eq!(laws.pos, 1.);
+        // A guess that was wrong (read anew a row further): the shown laws move on to it.
+        laws.take(table(&[14, 15, 99, 11, 12, 13], Some(0), 5));
+        assert_eq!(laws.pos, -1.);
+        settle(&mut laws);
+        assert_eq!(laws.pos, 0.);
+        // A different list: shown from its first row.
+        laws.pos = 0.5;
+        laws.take(table(&[1, 2, 3, 4, 5, 6], Some(0), 5));
+        assert_eq!(laws.pos, 0.);
     }
     #[test]
     fn the_laws_survive_the_resume_state() {
         let mut laws = Laws::default();
-        laws.take(table(&[10, 11, 12]));
+        laws.take(table(&[10, 11, 12], Some(2), 7));
         laws.date = Some(42);
         let mut w = savestate::W(Vec::new());
         laws.save(&mut w);
         let back = Laws::load(&mut savestate::R::new(&w.0)).unwrap();
         let t = back.table.as_ref().unwrap();
-        assert_eq!((back.date, t.rows.len(), t.rows[2][0], t.colors.get(&1)), (Some(42), 3, 12, Some(&2)));
+        assert_eq!((back.date, t.rows.len(), t.rows[2][0], t.colors.get(&1), t.marked, t.day), (Some(42), 3, 12, Some(&2), Some(2), 7));
         // Nothing kept: nothing shown.
         let mut w = savestate::W(Vec::new());
         Laws::default().save(&mut w);

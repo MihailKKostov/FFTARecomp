@@ -126,6 +126,24 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.48-android-preview
+
+**The laws move on with every day of travel.** The game's ▶ in its law
+list marks where its rotation is; it moves on one row a day and the law in
+force follows it once ▶ is on it (measured USA: day 1, ▶ on the 20th row,
+Items, Shell in force; day 2 ▶ on Shell, still in force; day 4 Protect in
+force and marked). The table read on the map keeps the marked row and the
+day of the month (EWRAM 0x2fbb). Each day that passes while travelling moves
+the shown laws on from it at once, scrolling (a row in 16 frames, faster
+when further behind) while the party keeps moving: nothing waits for it,
+and the hidden read of the list now starts only 90 frames after the day
+last changed, once the map waits for input. Read anew, the list is matched
+against the old one turned on: the shown laws keep their place and only
+move if the guess was wrong. Measured: day 1 to day 4, Shell, then Poison
+as day 3 begins, Protect as day 4 begins; the list read on arrival agrees
+(no correction); frame time while travelling unchanged (median 11.8 ms
+against 12.0 on the idle map, headless interpreter).
+
 ## 0.47-android-preview
 
 **The laws stay shown, and move on.** The laws read last stay on the world
