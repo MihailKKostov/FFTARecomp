@@ -126,6 +126,20 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.47-android-preview
+
+**The laws stay shown, and move on.** The laws read last stay on the world
+map while the date changes (travelling); before, they were hidden until
+read anew for the new date. When the list read anew is the old one turned
+on by some laws (most rows match the old list turned by k, k > 0), the
+shown laws scroll up through the laws that went to the new law in force,
+one native row a frame, each row's indent following its place (none in
+the first row, 16 columns from the second). Measured: travelling from day
+1 to day 4, Shell, Poison, then Protect in force, 32 frames.
+
+The laws are kept in the resume state, so they are shown from the first
+frame after resuming (states without them load as before).
+
 ## 0.46-android-preview
 
 **World map laws, rearranged.**

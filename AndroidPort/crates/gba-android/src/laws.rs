@@ -15,6 +15,10 @@
 //! BG2/BG3 are read, so the rows come without the map. The run is made again
 //! when the date shown changes.
 //!
+//! The laws read last stay shown while the date changes (travelling). When
+//! the list read anew is the old one turned on by some laws, the shown laws
+//! scroll up to the new one in force, each row's indent following its place.
+//!
 //! Shown: the title bar, the law in force and the next two always; the rest
 //! under them while the list is open. The law in force is flush left, the
 //! coming ones indented as the game indents its marked row (16 columns; the
@@ -49,7 +53,9 @@ pub(crate) const BANNER_ROWS: i32 = BANNER_TOP + (HEADER.1 - HEADER.0) as i32 + 
 /// Silent frames run per frame shown; frames for the list to appear; rows
 /// kept at most; frames before trying again after a failed run.
 const FRAMES_PER_TICK: u32 = 4;
-const OPEN_FRAMES: u32 = 180;
+const OPEN_FRAMES: u32 = 90;
+/// Native rows a frame the shown laws scroll by when the laws in force move on.
+const SCROLL_SPEED: f32 = 1.;
 const MAX_ROWS: usize = 48;
 const RETRY: u64 = 120;
 /// Frames after Down without a new row before Down is pressed again.
@@ -85,6 +91,9 @@ pub struct Laws {
     shown: (u64, u32),
     run: Option<Run>,
     retry: u64,
+    /// The laws in force moved on: the rows that went (above the new first
+    /// row) and how far the shown laws have scrolled to it (native rows).
+    advance: Option<(Vec<Vec<u16>>, f32)>,
     /// The whole list is shown, scrolled by `scroll` native rows.
     pub open: bool,
     pub scroll: f32,
@@ -161,10 +170,51 @@ fn date(bus: &mem::MemMap) -> Option<u64> {
     any.then_some(h)
 }
 
+fn put_pixels(w: &mut savestate::W, pixels: &[u16]) { w.bytes(&pixels.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<_>>()); }
+fn get_pixels(r: &mut savestate::R, len: usize) -> savestate::Res<Vec<u16>> {
+    let bytes = r.bytes()?;
+    if bytes.len() != len * 2 { return Err("Bad law pixels".into()); }
+    Ok(bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
+}
+
 impl Laws {
     pub fn toggle(&mut self) { self.open = !self.open; self.scroll = 0.; }
+    /// Kept in the resume state, so the laws are shown at once after resuming.
+    pub fn save(&self, w: &mut savestate::W) {
+        w.bool(self.table.is_some());
+        let Some(t) = &self.table else { return };
+        w.u64(self.date.unwrap_or(0));
+        put_pixels(w, &t.header);
+        w.u32(t.rows.len() as u32);
+        for row in &t.rows { put_pixels(w, row); }
+        w.u32(t.colors.len() as u32);
+        for (&from, &to) in &t.colors { w.u16(from); w.u16(to); }
+    }
+    pub fn load(r: &mut savestate::R) -> savestate::Res<Laws> {
+        if !r.bool()? { return Ok(Laws::default()); }
+        let date = r.u64()?;
+        let header = get_pixels(r, 240 * (HEADER.1 - HEADER.0))?;
+        let count = r.u32()? as usize;
+        if count == 0 || count > MAX_ROWS { return Err("Bad law count".into()); }
+        let rows = (0..count).map(|_| get_pixels(r, 240 * ROW)).collect::<savestate::Res<Vec<_>>>()?;
+        let colors = (0..r.u32()?.min(256)).map(|_| Ok((r.u16()?, r.u16()?))).collect::<savestate::Res<_>>()?;
+        Ok(Laws { table: Some(Table { header, rows, colors }), date: Some(date), ..Laws::default() })
+    }
     /// The banner and list are for the date shown now.
-    fn current(&self) -> Option<&Table> { self.table.as_ref().filter(|_| self.date.is_some() && self.date == Some(self.shown.0)) }
+    fn current(&self) -> Option<&Table> { self.table.as_ref() }
+    /// Takes the list read anew: when it is the old one turned on by some
+    /// laws (most rows in the same order), the shown laws scroll to it.
+    fn take(&mut self, new: Table) {
+        self.advance = self.table.as_ref().and_then(|old| {
+            let n = old.rows.len();
+            if n != new.rows.len() || n < 2 { return None; }
+            // Rows 1.. of the new list against the old one turned on by k.
+            let turned = |k: usize| (1..n).filter(|&i| new.rows[i] == old.rows[(i + k) % n]).count();
+            let (k, same) = (1..n).map(|k| (k, turned(k))).max_by_key(|&(_, c)| c)?;
+            (same * 2 >= n && turned(0) < same).then(|| (old.rows[..k].to_vec(), 0.))
+        });
+        self.table = Some(new);
+    }
 }
 
 impl Engine {
@@ -231,7 +281,7 @@ impl Engine {
         match end {
             Some(true) => {
                 let rows = run.rows.into_iter().map(unmarked).collect();
-                self.laws.table = Some(Table { header: run.header, rows, colors: run.colors });
+                self.laws.take(Table { header: run.header, rows, colors: run.colors });
                 self.laws.date = Some(run.date);
             }
             Some(false) => self.laws.retry = self.machine.bus.frames + RETRY,
@@ -272,8 +322,21 @@ impl Engine {
         let first = top + (HEADER.1 - HEADER.0) as i32;
         let indent = |i: usize| if i == 0 { 0 } else { INDENT as i32 };
         let shown = table.rows.len().min(SHOWN);
-        for (i, row) in table.rows.iter().enumerate().take(shown) { put(row, first + (i * ROW) as i32, indent(i), all); }
         let mut end = first + (shown * ROW) as i32;
+        if self.laws.open { self.laws.advance = None; }
+        if let Some((gone, scrolled)) = &mut self.laws.advance {
+            // The rows that went, then the new ones, scrolling up into place;
+            // a row's indent follows its place (none in the first).
+            *scrolled = (*scrolled + SCROLL_SPEED).min((gone.len() * ROW) as f32);
+            let s = scrolled.round() as i32;
+            for (j, row) in gone.iter().chain(&table.rows).enumerate().take(gone.len() + shown) {
+                let y = first + (j * ROW) as i32 - s;
+                put(row, y, ((y - first) * INDENT as i32 / ROW as i32).clamp(0, INDENT as i32), (first, end));
+            }
+            if *scrolled >= (gone.len() * ROW) as f32 { self.laws.advance = None; }
+        } else {
+            for (i, row) in table.rows.iter().enumerate().take(shown) { put(row, first + (i * ROW) as i32, indent(i), all); }
+        }
         if self.laws.open && table.rows.len() > shown {
             // Down to the button kept above the bottom HUD row.
             let (a, b) = (end, dock.1 - 160 + crate::game_buttons::ROW.0 - 30);
@@ -298,6 +361,40 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn table(names: &[u16]) -> Table {
+        Table { header: vec![7; 240 * (HEADER.1 - HEADER.0)], rows: names.iter().map(|&n| vec![n; 240 * ROW]).collect(), colors: [(1, 2)].into() }
+    }
+    #[test]
+    fn a_turned_list_scrolls_by_the_laws_that_went() {
+        let mut laws = Laws::default();
+        laws.take(table(&[10, 11, 12, 13, 14, 15]));
+        assert!(laws.advance.is_none());
+        // The law in force looks different there (its own colours): the rest decides.
+        laws.take(table(&[12, 13, 14, 15, 99, 11]));
+        let (gone, scrolled) = laws.advance.as_ref().unwrap();
+        assert_eq!((gone.len(), *scrolled), (2, 0.));
+        assert_eq!(gone[0][0], 10);
+        // Read again unchanged, or a different list: no scroll.
+        laws.take(table(&[12, 13, 14, 15, 99, 11]));
+        assert!(laws.advance.is_none());
+        laws.take(table(&[1, 2, 3, 4, 5, 6]));
+        assert!(laws.advance.is_none());
+    }
+    #[test]
+    fn the_laws_survive_the_resume_state() {
+        let mut laws = Laws::default();
+        laws.take(table(&[10, 11, 12]));
+        laws.date = Some(42);
+        let mut w = savestate::W(Vec::new());
+        laws.save(&mut w);
+        let back = Laws::load(&mut savestate::R::new(&w.0)).unwrap();
+        let t = back.table.as_ref().unwrap();
+        assert_eq!((back.date, t.rows.len(), t.rows[2][0], t.colors.get(&1)), (Some(42), 3, 12, Some(&2)));
+        // Nothing kept: nothing shown.
+        let mut w = savestate::W(Vec::new());
+        Laws::default().save(&mut w);
+        assert!(Laws::load(&mut savestate::R::new(&w.0)).unwrap().table.is_none());
+    }
     #[test]
     fn the_pointer_is_the_lists_small_sprite_only() {
         let mut m = gba_core::Machine::new(vec![0; 0x200]);

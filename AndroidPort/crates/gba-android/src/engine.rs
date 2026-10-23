@@ -196,6 +196,7 @@ impl Engine {
         self.world_map.save(&mut w);
         w.bool(self.party_cache.is_some());
         if let Some(cache)=&self.party_cache {cache.save(&mut w);}
+        self.laws.save(&mut w);
         w.0
     }
     /// Restores a resume state. Input in flight is dropped; a presentation
@@ -211,6 +212,7 @@ impl Engine {
             Ok(true)=>crate::menu_layout::PartyCache::load(&mut r).ok(),
             _=>None,
         };
+        self.laws=crate::laws::Laws::load(&mut r).unwrap_or_default();
         Ok(())
     }
     /// Touch-only portrait buttons of this scene, in the bottom HUD row:
