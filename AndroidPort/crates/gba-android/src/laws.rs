@@ -34,8 +34,6 @@
 use crate::engine::Engine;
 use gba_core::{mem, savestate, world_hud::TRANSPARENT};
 
-/// Key of the law list button (taps on game_buttons with it toggle the list).
-pub(crate) const KEY: u16 = 2;
 const L: u16 = 0x1ff;
 const DOWN: u16 = 0x37f;
 const RELEASED: u16 = 0x3ff;
@@ -50,11 +48,8 @@ const BANNER_TOP: i32 = 4;
 const SHOWN: usize = 3;
 /// Indent of the coming laws, and the columns the game's marked row is indented by.
 const INDENT: usize = 16;
-/// The list's button, under the laws on the left.
-const LABEL: &str = "Laws";
-const BUTTON_X: i32 = 8;
-/// Native rows the shown laws and their button take under the top of the frame.
-pub(crate) const BANNER_ROWS: i32 = BANNER_TOP + (HEADER.1 - HEADER.0) as i32 + (SHOWN * ROW) as i32 + 28;
+/// Native rows the shown laws take under the top of the frame (and a gap).
+pub(crate) const BANNER_ROWS: i32 = BANNER_TOP + (HEADER.1 - HEADER.0) as i32 + (SHOWN * ROW) as i32 + 4;
 /// Silent frames run per frame shown; frames for the list to appear; rows
 /// kept at most; frames before trying again after a failed run.
 const FRAMES_PER_TICK: u32 = 4;
@@ -117,6 +112,10 @@ pub struct Laws {
     /// The whole list is shown, scrolled by `scroll` native rows.
     pub open: bool,
     pub scroll: f32,
+    /// Texture rows of the shown laws (title bar to the last shown law); a tap
+    /// there opens or closes the list.
+    pub banner: Option<(i32, i32)>,
+    pub screen_banner: Option<(f32, f32)>,
     /// Texture rows of the list under the banner (while open), and its most scroll.
     pub area: Option<(i32, i32)>,
     pub max_scroll: f32,
@@ -353,15 +352,15 @@ impl Engine {
 
     /// After the frame, on the portrait world map: under the top of the frame
     /// the list's title bar, the law in force and the next ones (the coming
-    /// ones indented), the rest under them while open, then the list's
-    /// button on the left. Returns the button and its row offset.
-    pub(crate) fn laws_present(&mut self, dock: (i32, i32)) -> Option<(crate::game_buttons::Button, i32)> {
+    /// ones indented), the rest under them while open (a tap on the shown
+    /// laws opens and closes it).
+    pub(crate) fn laws_present(&mut self, dock: (i32, i32)) {
         self.laws.area = None;
+        self.laws.banner = None;
         self.laws.follow();
         let bus = &self.machine.bus;
-        if !bus.world_hud.map_frame || bus.world_hud.menu { return None; }
-        self.laws.current()?;
-        let table = self.laws.table.take()?;
+        if !bus.world_hud.map_frame || bus.world_hud.menu || self.laws.current().is_none() { return; }
+        let Some(table) = self.laws.table.take() else { return };
         let (rw, rh) = (mem::render_width(), mem::render_height() as i32);
         let ex = mem::extra() as i32;
         let colors = crate::engine::rgba_colors();
@@ -386,6 +385,7 @@ impl Engine {
         let row_at = |i: i64| &table.rows[i.rem_euclid(n as i64) as usize];
         let shown = n.min(SHOWN);
         let mut end = first + (shown * ROW) as i32;
+        self.laws.banner = Some((top, end));
         // From the row the laws have scrolled to: whole rows and the part between.
         let base = self.laws.pos.floor();
         let part = ((self.laws.pos - base) * ROW as f32).round() as i32;
@@ -396,8 +396,8 @@ impl Engine {
             put(row_at(base + j), y, ((y - first) * INDENT as i32 / ROW as i32).clamp(0, INDENT as i32), (first, end));
         }
         if self.laws.open && n > shown {
-            // Down to the button kept above the bottom HUD row.
-            let (a, b) = (end, dock.1 - 160 + crate::game_buttons::ROW.0 - 30);
+            // Down to the bottom HUD row.
+            let (a, b) = (end, dock.1 - 160 + crate::game_buttons::ROW.0 - 2);
             let content = ((table.rows.len() - shown) * ROW) as i32;
             self.laws.max_scroll = (content - (b - a)).max(0) as f32;
             self.laws.scroll = self.laws.scroll.clamp(0., self.laws.max_scroll);
@@ -409,10 +409,6 @@ impl Engine {
             self.laws.area = Some((a, end));
         }
         self.laws.table = Some(table);
-        let open = self.laws.open;
-        let w = crate::game_buttons::width(&self.machine.bus.rom, LABEL);
-        let button = crate::game_buttons::Button { x: (BUTTON_X, BUTTON_X + w), label: LABEL, key: KEY, active: open, top: true };
-        Some((button, end + 1 - crate::game_buttons::ROW.0))
     }
 }
 

@@ -126,6 +126,15 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.49-android-preview
+
+**Tap the laws for the whole list.** The Laws button is gone: a tap on the
+shown laws (title bar to the third law) opens the whole list under them,
+and with it open any tap closes it (on the laws, the list or the map; a
+tap on the map then does not move the party). A drag on the list still
+scrolls it. The map moves up by the button's rows, and the open list
+reaches down to the bottom HUD row.
+
 ## 0.48-android-preview
 
 **The laws move on with every day of travel.** The game's ▶ in its law

@@ -230,17 +230,14 @@ impl Engine {
             self.mouse.cancel();
             self.party_goal=None;
             if key==0 {self.toggle_shop_info();}
-            else if key==crate::laws::KEY {self.laws.toggle();}
             // The game is still moving to the shop list's shown rows: the button waits for it.
             else if self.shop_scroll.catching_up() {self.shop_scroll.deferred=Some(key);}
             else {self.press_button(key);}
             return;
         }
-        // The law list: taps on it do nothing, elsewhere they close it.
-        if self.laws.open {
-            if !self.laws.screen_area.is_some_and(|(a,b)|py>=a && py<b) {self.laws.open=false;}
-            return;
-        }
+        // The shown laws open and close the whole list; with it open, any tap closes it.
+        if self.laws.screen_banner.is_some_and(|(a,b)|py>=a && py<b) {self.mouse.cancel();self.laws.toggle();return;}
+        if self.laws.open {self.laws.open=false;return;}
         if self.quantity_tap(x,y) {return;}
         let band=self.ui_band();
         let state=&self.machine.bus.ffta_dialogue;
