@@ -250,9 +250,16 @@ impl Engine {
         let index=if matches!(state.extra.kind,PanelKind::Actions|PanelKind::Notice)&&state.extra.active(){Some(1)}
             else if state.action_layout||state.town_layout||state.shop_layout {Some(0)}else{None};
         let mut handled=false;
-        if (battle::MenuScene::read(&self.machine.bus).is_some()||state.shop_layout)&&index.is_some(){
+        // A menu the game draws on the field (the battle's "Do it / Cancel",
+        // shown with no docked menu panel) is not in the docked panels: a tap
+        // off them goes to the field. Not with a docked menu, which the field
+        // would find again where the game draws it.
+        let ui=(battle::MenuScene::read(&self.machine.bus).is_some()||state.shop_layout)&&index.is_some();
+        let town=state.town_layout||state.shop_layout;
+        let docked=if ui {pieces(&self.machine.bus,band,index.unwrap(),self.town_menu).iter().find_map(|l|l.source(px,py))}else{None};
+        if let Some(source)=docked{
             let i=index.unwrap();
-            if let Some(source)=pieces(&self.machine.bus,band,i,self.town_menu).iter().find_map(|l|l.source(px,py)){
+            {
                 let mut nx=(source%480) as f32-120.;let ny=(source/480) as f32;
                 if !(state.town_layout||state.shop_layout||state.site_layout||state.extra.kind==PanelKind::Notice){
                     let bounds=if i==0{dialogue::panel_bounds(&state.pixels,&state.backing)}else{dialogue::panel_bounds(&state.extra.pixels,&state.extra.backing)};
@@ -267,7 +274,7 @@ impl Engine {
                 handled=battle::aim(&mut self.machine.bus,nx,ny,true);
                 if !handled && self.town_buttons() && self.pointer_menu_tap(nx,ny) {return;}
             }
-        }else{
+        }else if !(ui&&(town||index==Some(1))){
             let nx=(px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32-mem::extra() as f32;
             let ny=(py-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32-mem::extra_y() as f32;
             // Portrait Party screens: the party above, the unit's screen below; taps between do nothing.

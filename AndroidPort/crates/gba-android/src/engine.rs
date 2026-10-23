@@ -262,6 +262,13 @@ impl Engine {
             }
             return row(&bus.rom,236,&[("Return",back,false)]);
         }
+        // Battle: back out of choosing a cell (moving, a target) or of a
+        // command's sub-menu or of Wait's facing, which only B leaves. At the
+        // top: the bottom holds the unit's panel and the command menu.
+        if battle::Scene::read(bus).is_some() || battle::facing_center(bus).is_some()
+            || (bus.ffta_dialogue.action_layout && battle::MenuScene::read(bus).is_some()) {
+            return row(&bus.rom,236,&[("Return",back,false)]).into_iter().map(|b|crate::game_buttons::Button{top:true,..b}).collect();
+        }
         Vec::new()
     }
     /// Shop buttons by where the shop is (none in its menu, which has Leave,

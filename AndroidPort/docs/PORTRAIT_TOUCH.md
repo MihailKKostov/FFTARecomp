@@ -126,6 +126,37 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.56-android-preview
+
+**Battles by touch.**
+- A tap on a unit chooses the cell it stands on. A unit is drawn above its
+  cell, so its body covers the cells behind it: a tap on an enemy's body
+  chose an empty cell behind it, and A there did nothing (Fight seemed
+  dead). Units are found in OAM (`ffta_battle_mouse::units`): runs of
+  field-priority sprites (not the menus' priority 0) from the units' tiles
+  (under 0x120), one palette, tiles 1-4 apart, touching; their feet 8
+  pixels over the bottom, at their middle (measured: each unit's feet on
+  its cell's centre). Only drawn pixels count (within 3 pixels of the tap),
+  so a tap on grass beside a unit still takes that cell.
+- "Do it / Cancel" (drawn on the field, not docked): a tap on it was looked
+  for in the docked panels only. With no docked menu panel a tap off the
+  panels now goes to the field. With one (the command menus) it does not,
+  or the field would find the menu where the game draws it.
+- Facing (after acting, or Wait): the arrow the unit faces is lit and
+  animated (tiles 0x137, 0x13a as measured), so the four arrows were not
+  found and a tap pressed a blind A, keeping the facing. Top halves
+  0x135-0x138 and bottom 0x139-0x13c now count: a tap turns the unit
+  toward it and confirms.
+- Return (B) at the top of the screen (the bottom holds the unit's panel
+  and the command menu) while choosing a cell (Move, a target), in a
+  command's sub-menu (Fight / White Magic / Item, ability and item lists)
+  and at Wait's facing. Before, touch only had no way back from them.
+Measured, touch only, on Herb Picking from the user's save: Move, a cell;
+Action, Fight, a unit, the preview, Do it (the attack, then facing by tap,
+the enemies' turns, the next unit's menu); White Magic, Cure, a unit, Do
+it; Item, Antidote's targets; Wait, facing; Status and its Return; Return
+from targeting to Action to the menu.
+
 ## 0.55-android-preview
 
 **Loading a save by touch.**

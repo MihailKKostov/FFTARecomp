@@ -680,6 +680,83 @@ impl Scene {
             .max_by_key(|c| (c.x as u16 + c.y as u16, c.height))
             .copied()
     }
+    /// The cell of the unit drawn at native (x, y): a unit stands above its
+    /// cell, so a tap on its body is behind (above) the cell it means.
+    pub fn unit_hit(&self, mem: &MemMap, x: f32, y: f32) -> Option<Cell> {
+        units(mem).into_iter().filter(|u| u.drawn_at(mem, x, y))
+            .filter_map(|u| self.cells.iter().find(|c| (c.center[0] - u.feet[0]).abs() < 4. && (c.center[1] - u.feet[1]).abs() < 4.))
+            .max_by_key(|c| (c.x as u16 + c.y as u16, c.height))
+            .copied()
+    }
+}
+/// A unit's sprite on the field: its pieces (OAM slots) and its feet, 8
+/// pixels over the bottom of its pieces at their middle (measured on the
+/// Herb Picking field: a 16x40 unit's feet at its cell's centre).
+struct Unit { pieces: Vec<usize>, feet: [f32; 2] }
+/// One shown, unrotated sprite: (x, y, width, height).
+fn piece(oam: &[u8], i: usize) -> Option<(i32, i32, i32, i32)> {
+    let (a0, a1) = (h(oam, i * 8)?, h(oam, i * 8 + 2)?);
+    if a0 & 0x300 != 0 { return None; }
+    let (w, ht) = match (a0 >> 14, a1 >> 14) {
+        (0, n) => (8 << n, 8 << n),
+        (1, 0) => (16, 8), (1, 1) => (32, 8), (1, 2) => (32, 16), (1, 3) => (64, 32),
+        (2, 0) => (8, 16), (2, 1) => (8, 32), (2, 2) => (16, 32), (2, 3) => (32, 64),
+        _ => return None,
+    };
+    let x = (a1 & 511) as i32; let y = (a0 & 255) as i32;
+    Some((if x >= 240 { x - 512 } else { x }, if y >= 160 { y - 256 } else { y }, w, ht))
+}
+/// Units drawn on the field: runs of field-priority sprites (not the menus'
+/// priority 0) from the units' tiles (under the cursor's 0x120) of one
+/// palette whose tiles follow each other (a unit's pieces take its tiles in
+/// order, 1 to 4 apart) and touch.
+fn units(mem: &MemMap) -> Vec<Unit> {
+    let mut units: Vec<Unit> = Vec::new();
+    let mut last: Option<(usize, u16, (i32, i32, i32, i32))> = None;
+    for i in 0..128 {
+        let Some(p) = piece(&mem.oam, i) else { last = None; continue };
+        let a2 = h(&mem.oam, i * 8 + 4).unwrap_or(0);
+        let tile = a2 & 0x3ff;
+        if a2 >> 10 & 3 == 0 || tile >= 0x120 || p.1 + p.3 <= 0 || p.1 >= 160 { last = None; continue; }
+        let joins = last.is_some_and(|(j, t, q)| j + 1 == i && h(&mem.oam, j * 8 + 4).unwrap_or(0) >> 12 == a2 >> 12
+            && (1..=4).contains(&(tile as i32 - t as i32))
+            && p.0 <= q.0 + q.2 && q.0 <= p.0 + p.2 && p.1 <= q.1 + q.3 && q.1 <= p.1 + p.3);
+        if joins { units.last_mut().unwrap().pieces.push(i); } else { units.push(Unit { pieces: vec![i], feet: [0.; 2] }); }
+        last = Some((i, tile, p));
+    }
+    for u in &mut units {
+        let boxes: Vec<_> = u.pieces.iter().filter_map(|&i| piece(&mem.oam, i)).collect();
+        let left = boxes.iter().map(|b| b.0).min().unwrap_or(0);
+        let right = boxes.iter().map(|b| b.0 + b.2).max().unwrap_or(0);
+        let bottom = boxes.iter().map(|b| b.1 + b.3).max().unwrap_or(0);
+        u.feet = [(left + right) as f32 / 2., (bottom - 8) as f32];
+    }
+    units.retain(|u| u.pieces.len() > 1);
+    units
+}
+impl Unit {
+    /// A drawn (not transparent) pixel of the unit within 3 pixels of (x, y).
+    fn drawn_at(&self, mem: &MemMap, x: f32, y: f32) -> bool {
+        let one_d = h(&mem.io, 0).unwrap_or(0) & 0x40 != 0;
+        self.pieces.iter().any(|&i| {
+            let Some((px, py, w, ht)) = piece(&mem.oam, i) else { return false };
+            let (a1, a2) = (h(&mem.oam, i * 8 + 2).unwrap_or(0), h(&mem.oam, i * 8 + 4).unwrap_or(0));
+            let wide = h(&mem.oam, i * 8).unwrap_or(0) & 0x2000 != 0;
+            (-3..=3).any(|dy| (-3..=3).any(|dx| {
+                let (sx, sy) = ((x + dx as f32).floor() as i32 - px, (y + dy as f32).floor() as i32 - py);
+                if sx < 0 || sy < 0 || sx >= w || sy >= ht { return false; }
+                let sx = if a1 & 0x1000 != 0 { w - 1 - sx } else { sx };
+                let sy = if a1 & 0x2000 != 0 { ht - 1 - sy } else { sy };
+                let (tx, ty) = (sx / 8, sy / 8);
+                let step = if wide { 2 } else { 1 };
+                let row = if one_d { w / 8 * step } else { 32 };
+                let tile = (a2 & 0x3ff) as i32 + ty * row + tx * step;
+                let offset = 0x10000 + (tile as usize & 0x3ff) * 32 + (sy % 8 * 8 + sx % 8) as usize / if wide { 1 } else { 2 };
+                let byte = mem.vram.get(offset).copied().unwrap_or(0);
+                if wide { byte != 0 } else { (byte >> (sx % 2 * 4)) & 15 != 0 }
+            }))
+        })
+    }
 }
 /// Exact packed-quarter style query from USA0801D58C / EUR0801E6FC.
 pub fn range_value(mem: &MemMap, x: u8, y: u8) -> u8 {
@@ -765,7 +842,7 @@ pub fn aim(mem: &mut MemMap, x: f32, y: f32, confirm: bool) -> bool {
         return if let Some(index) = scene.hit(x,y) { menu_select(mem,index,confirm) }
         else { mem.ffta_battle_mouse.cancel(); false };
     }
-    let cell = Scene::read(mem).and_then(|s| s.hit(x, y));
+    let cell = Scene::read(mem).and_then(|s| s.unit_hit(mem, x, y).or_else(|| s.hit(x, y)));
     let Some(c) = cell else {
         mem.ffta_battle_mouse.cancel();
         return false;
@@ -849,8 +926,10 @@ pub fn facing_center(mem:&MemMap)->Option<[f32;2]> {
     let mut pieces=Vec::new();
     for o in mem.oam.chunks_exact(8) {
         let a=h(o,0)?;let b=h(o,2)?;let c=h(o,4)?;
-        if a&0xff00==0 && b&0xee00==0 && matches!(c,0x135|0x139) {
-            pieces.push(((b&511)as i32,(a&255)as i32,c,b&0x1000!=0));
+        // The arrow the unit faces is lit, its tiles animated (top halves
+        // 0x135-0x138, bottom 0x139-0x13c; measured 0x137 and 0x13a).
+        if a&0xff00==0 && b&0xee00==0 && (0x135..=0x13c).contains(&c) {
+            pieces.push(((b&511)as i32,(a&255)as i32,if c<0x139 {0x135} else {0x139},b&0x1000!=0));
         }
     }
     if pieces.len()!=4 {return None;}
@@ -1775,6 +1854,27 @@ mod tests {
         assert_eq!(keys(&mut m.bus,RELEASED),RELEASED);
     }
     #[test]
+    fn a_tap_on_a_unit_chooses_the_cell_it_stands_on() {
+        let mut m=fixture();
+        m.bus.ewram[0x7f60..0x7f64].copy_from_slice(&[100,0,40,0]);
+        // A 16x32 unit of two 16x16 pieces (field priority 2, drawn tiles)
+        // over cell (2,2), whose centre is (100,64): its feet.
+        for(i,(y,tile))in[(40u16,0x10u16),(56,0x14)].into_iter().enumerate(){
+            for(o,v)in[(i*8,y),(i*8+2,0x4000|92),(i*8+4,0x800|tile)]{m.bus.oam[o..o+2].copy_from_slice(&v.to_le_bytes());}
+        }
+        m.bus.vram[0x10200..0x10300].fill(0x11);
+        let scene=Scene::read(&m.bus).unwrap();
+        // Its head is over cell (1,1); the tap means the unit.
+        assert_eq!(scene.hit(100.,45.).map(|c|(c.x,c.y)),Some((1,1)));
+        assert_eq!(scene.unit_hit(&m.bus,100.,45.).map(|c|(c.x,c.y)),Some((2,2)));
+        assert!(aim(&mut m.bus,100.,45.,true));
+        assert_eq!(m.bus.ffta_battle_mouse.request.map(|r|(r.x,r.y)),Some((2,2)));
+        // Off its drawn pixels, or a menu's sprite (priority 0): the cell.
+        assert!(scene.unit_hit(&m.bus,120.,45.).is_none());
+        for i in 0..2 {m.bus.oam[i*8+5]&=!0x0c;}
+        assert!(scene.unit_hit(&m.bus,100.,45.).is_none());
+    }
+    #[test]
     fn free_unit_selection_does_not_require_unused_ui_backgrounds() {
         let mut m=fixture();
         for(o,v)in[(0,0x1340u16),(8,0x4c03),(10,0x4e02),(12,0x0b08),(14,0x0a08)] {
@@ -1792,6 +1892,14 @@ mod tests {
             for(o,v)in[(i*8,y),(i*8+2,x|flip),(i*8+4,t)]{m.bus.oam[o..o+2].copy_from_slice(&v.to_le_bytes());}
         }
         assert_eq!(facing_center(&m.bus),Some([119.,57.]));
+        // The arrow the unit faces is lit.
+        for lit in [0x137u16,0x13a] {
+            let slot=if lit<0x139 {0} else {3};
+            let unlit=if lit<0x139 {0x135u16} else {0x139};
+            m.bus.oam[slot*8+4..slot*8+6].copy_from_slice(&lit.to_le_bytes());
+            assert_eq!(facing_center(&m.bus),Some([119.,57.]));
+            m.bus.oam[slot*8+4..slot*8+6].copy_from_slice(&unlit.to_le_bytes());
+        }
         assert!(aim(&mut m.bus,151.,73.,false));
         let out:Vec<_>=(0..10).map(|_|keys(&mut m.bus,RELEASED)).collect();
         assert_eq!(out.iter().filter(|&&k|k==0x3ef).count(),4);
