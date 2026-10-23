@@ -866,6 +866,7 @@ pub fn keys(mem: &mut MemMap, physical: u16) -> u16 {
         mem.ffta_battle_mouse.graph.cancel();
         mem.ffta_battle_mouse.rows.cancel();
         mem.ffta_battle_mouse.shop.quantity=None;
+        mem.ffta_battle_mouse.shop.row=None;
         return physical;
     }
     if !mem.ffta_battle_mouse.enabled {

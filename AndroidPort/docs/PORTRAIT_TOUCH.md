@@ -126,6 +126,46 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.42-android-preview
+
+**Tapping an item selects it at once.** A tap on a shop list row moves the
+game's cursor straight there on the next frame (highlight, stats, Info and
+sound are the game's own); a tap on the selected row buys or sells it.
+The list handler (USA 0x08029f7c, list owner in r9, cursor at r9+0x4c)
+computes the next row into r6 for Down and Up and then sets the cursor
+from it; where it does, the tapped row is put in r6 instead. It has two
+ways: lists that scroll (0x08029fe2, 0x0802a06c) and lists that fit and
+wrap around (0x0802a118, 0x0802a172). Before, the jump only worked until
+the handler was compiled (its blocks then start at its entry, now
+interpreted from there) and never in lists that fit, so the cursor walked
+there a row at a time. Catching up after a fling uses the same jump.
+Measured: Bronze Helm to Green Beret and back, Potion to X-Potion, each on
+the frame after the tap.
+
+**Item Info opens and closes only at the top.** The Info window slides in
+and out over 4 frames, and the game redraws its tiles partway down the
+frame, a step ahead of WIN1. Now:
+- the list under the window is drawn from the kept maps over the whole
+  range the window can cover (x 120-240), also on the first and last
+  frames of the slide (Buy/Sell steps 61 and 63) when its tiles are not
+  drawn yet or are already gone;
+- the top panel takes only window tiles (BG3 palette 11) inside WIN1, and
+  window text (BG2 palette 11);
+- while it closes, rows still behind the top row are left out;
+- its height is read row by row between each row's own edges, so it stays
+  the window's text rows while sliding.
+
+Before, the window flashed at its native place over the list as it
+opened, and list fragments showed in the top panel as it closed.
+
+**Reviewed, unchanged.**
+- The Sell list's "equipped" message breaks up the stats panel for a few
+  frames as it slides out; the original does the same.
+- The quantity digit highlight stays on the units digit, since touch
+  never moves it.
+- The scroll arrows hide while the list moves and come back with the
+  game's own blinking once it settles.
+
 ## 0.41-android-preview
 
 **Quantity arrows.** In the quantity window the game's menu-font `<` and `>`

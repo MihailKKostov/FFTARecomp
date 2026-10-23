@@ -667,18 +667,37 @@ fn notice_bounds(mem:&MemMap)->Option<[i32;4]> {
 pub fn shop_info_open(mem:&MemMap)->bool {shop_info_bounds(mem).is_some()}
 /// The shop list was kept to be drawn under the Info window.
 pub fn shop_list_kept(mem:&MemMap)->bool {mem.ffta_dialogue.shop_maps.is_some()}
-/// The shop's item Info window: WIN1 framing the window whose corners the
-/// game writes into BG3 (top-left 0xb00d, top-right 0xb00e). Measured 104x144
-/// at 128,8 (USA); the quantity window uses the same frame, but small.
+/// The shop's item Info window: WIN1 framing the window the game draws into
+/// BG3 in its frame tiles (palette 11; corners 0xb00d, 0xb00e). Measured
+/// (USA): 104x144 at 128,8; it slides in from the right edge and back out
+/// over 4 frames each, 32 pixels a frame, WIN1 rows 8-152 and right edge 240
+/// (232 open) the while. The game moves the tiles mid-frame, a step ahead of
+/// WIN1, so rows below differ from rows above. The quantity window uses the
+/// same frame, but small; WIN1 can stay on, empty (240-240), after Info closes.
 fn shop_info_bounds(mem:&MemMap)->Option<[i32;4]> {
     if io16(mem,0)&0x4000==0 || io16(mem,0xc)!=0x0b08 || io16(mem,0xe)!=0x0a08 {return None;}
-    let h=io16(mem,0x42);let v=io16(mem,0x46);
-    let [l,t,r,b]=[(h>>8)as usize,(v>>8)as usize,(h&255)as usize,(v&255)as usize];
-    if l>=r || t>=b || r>240 || b>160 || r-l<96 || b-t<96 {return None;}
-    let base=0x0a*0x800;
-    let (hofs,vofs)=((io16(mem,0x1c)&511) as usize,(io16(mem,0x1e)&511) as usize);
-    let entry=|x:usize,y:usize|{let o=base+(((y+vofs)/8%32)*32+(x+hofs)/8%32)*2;u16::from_le_bytes([mem.vram[o],mem.vram[o+1]])};
-    (entry(l,t)==0xb00d && entry(r-8,t)==0xb00e).then_some([l as i32,t as i32,r as i32,b as i32])
+    let v=io16(mem,0x46);
+    let (t,b)=((v>>8)as usize,(v&255)as usize);
+    if (t,b)!=(8,152) || !matches!(io16(mem,0x42)&255,232|240) {return None;}
+    match (t..b).step_by(8).filter_map(|y|shop_info_left(mem,y)).min() {
+        Some(left)=>Some([left,t as i32,(left+104).min(240),b as i32]),
+        // Sliding in or out (Buy or Sell list steps 61, 63), its tiles not
+        // drawn yet or gone: the game draws them mid-frame.
+        None=>matches!(crate::ffta_shop_mouse::handler_step(mem),Some((1|2,61|63))).then_some([232,t as i32,240,b as i32]),
+    }
+}
+/// The Info window's left edge on screen row `line`: its first frame tile
+/// (BG3, palette 11) from x 128.
+fn shop_info_left(mem:&MemMap,line:usize)->Option<i32> {
+    (128..240).step_by(8).find(|&x|shop_info_tile(mem,x,line)).map(|x|x as i32)
+}
+/// Screen point (x, line) shows an Info window tile (BG3, palette 11).
+fn shop_info_tile(mem:&MemMap,x:usize,line:usize)->bool {shop_palette(mem,3,x,line)==0xb}
+/// The palette of BG `bg`'s (2 or 3, the shop's maps) tile at screen point (x, line).
+fn shop_palette(mem:&MemMap,bg:usize,x:usize,line:usize)->u8 {
+    let (hofs,vofs)=((io16(mem,0x10+bg*4)&511) as usize,(io16(mem,0x12+bg*4)&511) as usize);
+    let o=(0x0d-bg)*0x800+(((line+vofs)/8%32)*32+(x+hofs)/8%32)*2;
+    mem.vram[o+1]>>4
 }
 /// Shop list pixels under the Info window: BG `bg` (2 text, 3 backing) of
 /// screen columns `x0..x1` on `line`, from the maps kept while it was closed.
@@ -686,6 +705,9 @@ fn shop_info_bounds(mem:&MemMap)->Option<[i32;4]> {
 /// left of the window): the game hides its digits while the Info window is
 /// open. List rows take the highlight palette of their live entry left of
 /// the range.
+/// Screen columns the Info window can cover: from the tile left of where it
+/// opens to the right edge.
+const SHOP_INFO_RANGE:(usize,usize)=(120,240);
 fn shop_list_under_info(mem:&MemMap,bg:usize,line:usize,out:&mut Line,x0:usize,x1:usize) {
     let Some(maps)=&mem.ffta_dialogue.shop_maps else {return};
     let cnt=io16(mem,8+bg*2);
@@ -708,6 +730,14 @@ fn shop_list_under_info(mem:&MemMap,bg:usize,line:usize,out:&mut Line,x0:usize,x
         let index=(byte>>(4*(fx&1)))&15;
         out[x]=if index==0 {TRANSPARENT}else{pal16(mem,((entry>>12) as usize&15)*16+index as usize)};
     }
+}
+fn claim_shop_info(mem:&mut MemMap,bounds:[i32;4]) {
+    if mem.ffta_dialogue.extra.kind!=crate::ffta_dialogue::PanelKind::None {return;}
+    mem.ffta_dialogue.shop_info=Some(bounds);
+    mem.ffta_dialogue.extra.kind=crate::ffta_dialogue::PanelKind::Info;
+    mem.ffta_dialogue.extra.bounds=Some(bounds);
+    mem.ffta_dialogue.extra.pixels.resize(crate::ffta_dialogue::LAYER_WIDTH*160,Default::default());
+    mem.ffta_dialogue.extra.pixels.fill(Default::default());
 }
 fn begin_dialogue_frame(mem: &mut MemMap) {
     mem.ffta_dialogue.reuse_world_row=false;
@@ -770,13 +800,7 @@ fn begin_dialogue_frame(mem: &mut MemMap) {
     // Portrait docking only: there the Info window moves to the top.
     if shop && !town && mem.ffta_dialogue.separate && mem.ffta_dialogue.docked {
         if let Some(bounds)=shop_info_bounds(mem).filter(|_|mem.ffta_dialogue.shop_maps.is_some()) {
-            if mem.ffta_dialogue.extra.kind==crate::ffta_dialogue::PanelKind::None {
-                mem.ffta_dialogue.shop_info=Some(bounds);
-                mem.ffta_dialogue.extra.kind=crate::ffta_dialogue::PanelKind::Info;
-                mem.ffta_dialogue.extra.bounds=Some(bounds);
-                mem.ffta_dialogue.extra.pixels.resize(crate::ffta_dialogue::LAYER_WIDTH*160,Default::default());
-                mem.ffta_dialogue.extra.pixels.fill(Default::default());
-            }
+            claim_shop_info(mem,bounds);
         } else if io16(mem,0xc)==0x0b08 && io16(mem,0xe)==0x0a08
             // No window frame (BG3 palette 11: Info, also while it opens, or the
             // quantity) where the Info window goes. WIN1 can stay on after it closes.
@@ -979,11 +1003,11 @@ fn capture_dialogue_part_impl<const FAST:bool,const LEAN:bool>(mem:&mut MemMap, 
     }
     // The shop list under the Info window, as it was before the window covered it.
     let info=mem.ffta_dialogue.shop_info;
-    if let Some([l,t,r,b])=info.filter(|_|!extra_panel && !background_only) {
+    // All of it while the window slides: its tiles move mid-frame.
+    if let Some([_,t,_,b])=info.filter(|_|!extra_panel && !background_only) {
         if (t..b).contains(&(line as i32)) {
-            let l=(l-8).max(0) as usize;
-            if ui_mask!=0 && used[2] {shop_list_under_info(mem,2,line,&mut text,l,r as usize);}
-            if ui_mask!=0 && used[3] {shop_list_under_info(mem,3,line,&mut backing,l,r as usize);}
+            if ui_mask!=0 && used[2] {shop_list_under_info(mem,2,line,&mut text,SHOP_INFO_RANGE.0,SHOP_INFO_RANGE.1);}
+            if ui_mask!=0 && used[3] {shop_list_under_info(mem,3,line,&mut backing,SHOP_INFO_RANGE.0,SHOP_INFO_RANGE.1);}
         }
     }
     if background_only && mem.ffta_dialogue.action_layout {
@@ -1038,6 +1062,12 @@ fn capture_dialogue_part_impl<const FAST:bool,const LEAN:bool>(mem:&mut MemMap, 
     let win0v=io16(mem,0x44);let win1v=io16(mem,0x46);
     let win0row=dispcnt&0x2000!=0 && in_window_range((win0v>>8)as u8,win0v as u8,line as u8);
     let win1row=dispcnt&0x4000!=0 && in_window_range((win1v>>8)as u8,win1v as u8,line as u8);
+    // Closing (Buy or Sell list step 63), the game moves the window's top row
+    // first, and the rest a step ahead of WIN1: rows still behind are not shown.
+    let info_clip=info.filter(|_|extra_panel && matches!(crate::ffta_shop_mouse::handler_step(mem),Some((1|2,63)))).map_or(128,|[_,t,_,_]|{
+        let ahead=if win1h&255==240 {(win1h>>8) as i32+32}else{128};
+        shop_info_left(mem,t as usize).unwrap_or(240).max(ahead)
+    });
     let flat_backing=!mem.ffta_dialogue.town_layout && !mem.ffta_dialogue.shop_layout
         && mem.ffta_dialogue.extra.kind!=crate::ffta_dialogue::PanelKind::Notice;
     for cx in 0..LAYER_WIDTH {
@@ -1071,9 +1101,12 @@ fn capture_dialogue_part_impl<const FAST:bool,const LEAN:bool>(mem:&mut MemMap, 
                     && in_window_range((vv>>8) as u8,vv as u8,line as u8) {control=mask;}
             }
         }
-        // Shop Info: the window goes to the extra canvas, the list under it
-        // (with its own blending, outside WIN1) to the main canvas.
-        let info_inside=info.map(|[l,t,r,b]|x>=l && x<r && line as i32>=t && (line as i32)<b);
+        // Shop Info: the window as shown (its tiles inside WIN1) goes to the
+        // extra canvas, the list under it (with its own blending, outside
+        // WIN1) to the main canvas.
+        let info_inside=info.map(|[_,t,_,b]|line as i32>=t && (line as i32)<b
+            && if extra_panel {win1row && x>=info_clip && x<240 && in_window_range((win1h>>8) as u8,win1h as u8,x as u8) && shop_info_tile(mem,x as usize,line)}
+            else{x>=SHOP_INFO_RANGE.0 as i32 && x<SHOP_INFO_RANGE.1 as i32});
         if info_inside==Some(true) && !extra_panel {control=winout&63;}
         let mut candidates=[(0u16,5usize,255u8,false);5];let mut n=0;
         let mut top=[(0u16,5usize,255u8,false);3];let mut nt=0;
@@ -1084,6 +1117,9 @@ fn capture_dialogue_part_impl<const FAST:bool,const LEAN:bool>(mem:&mut MemMap, 
             }else{!mem.ffta_dialogue.action_layout || (if extra_panel{x>=160}else{x<160})};
         for bg in bg_order {
             if !used[bg] || control&(1<<bg)==0 {continue;}
+            // Its text only (palette 11): list text the game restores above
+            // the window's tiles as it closes is not part of it.
+            if bg==2 && extra_panel && info_inside==Some(true) && shop_palette(mem,2,x as usize,line)!=0xb {continue;}
             let color=match bg {
                 2 if ui_mask!=0=>if FAST{fast_text}else if (0..240).contains(&x) {text[x as usize]}else{TRANSPARENT},
                 3 if ui_mask!=0=>{

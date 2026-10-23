@@ -44,10 +44,16 @@ pub fn canvas_blocks(pixels:&[dialogue::UiPixel])->Vec<([i32;4],(usize,usize))>{
 /// Where a block of the main canvas goes in a portrait docking frame. Decided
 /// only by its native position, never by scene classification or its current
 /// size, so opening animations and late classification cannot make it jump.
-fn dock_for(state:&dialogue::DialogueState,menu:Option<[i32;4]>,block:[i32;4],(y0,y1):(usize,usize))->Dock{
+/// `lists`: a Buy or Sell list is up (the shop menu cannot be sliding then).
+fn dock_for(state:&dialogue::DialogueState,menu:Option<[i32;4]>,lists:bool,block:[i32;4],(y0,y1):(usize,usize))->Dock{
     // A speech bubble is anchored to a screen edge in the upper rows, also while
     // it opens or closes (shop lists open from the top rows but never touch an edge).
     let bubble=(block[0]<=0 || block[2]>=240) && y1<=72;
+    if state.shop_layout && lists {
+        // Inside the lists every window keeps its place (a panel closing at
+        // the left edge is not the shop menu sliding).
+        return if bubble {Dock::Top} else {Dock::Bottom};
+    }
     if state.shop_layout {
         // The town menu sliding out of (or into) the left edge moves with its thumb
         // block; before one was seen, with the measured root window (shop, pub:
@@ -78,16 +84,24 @@ fn thumb(state:&dialogue::DialogueState,block:[i32;4])->Dock{
 /// The town menu block of a town frame's main canvas (placed in the thumb zone).
 pub fn town_menu(state:&dialogue::DialogueState)->Option<[i32;4]>{
     if !state.town_layout || state.layer().is_none() {return None;}
-    canvas_blocks(&state.pixels).into_iter().filter(|(b,_)|b[2]>0 && b[0]<240).find_map(|(b,c)|match dock_for(state,None,b,c) {
+    canvas_blocks(&state.pixels).into_iter().filter(|(b,_)|b[2]>0 && b[0]<240).find_map(|(b,c)|match dock_for(state,None,false,b,c) {
         Dock::Thumb=>Some(b),Dock::Follow(m)=>Some(m),_=>None})
 }
 
 /// Rows of the Info window (`bounds`, its 8-row edges included) down to its
 /// last text, in whole tiles with a margin, without its bottom edge.
+/// Each row is read between its own edges: while the window slides, rows
+/// below can be a step ahead of rows above, and it gets an edge at the
+/// screen's right.
 fn info_rows(pixels:&[dialogue::UiPixel],[l,t,r,b]:[i32;4])->i32{
     let at=|x:i32,y:i32|pixels.get((y*dialogue::LAYER_WIDTH as i32+x+dialogue::LAYER_INSET) as usize).copied();
-    let body=at(l+10,t+10).map(|p|p.color);
-    let text=(t+8..b-8).rev().find(|&y|(l+8..r-8).any(|x|at(x,y).is_some_and(|p|p.visible() && Some(p.color)!=body)));
+    let shown=|x:i32,y:i32|at(x,y).is_some_and(|p|p.visible());
+    let text=(t+8..b-8).rev().find(|&y|{
+        let Some(left)=(l.min(128)..r.max(240)).find(|&x|shown(x,y)) else {return false};
+        let right=(left..240).rev().find(|&x|shown(x,y)).unwrap_or(left)+1;
+        let body=at(left+10,y).map(|p|p.color);
+        (left+8..(left+96).min(right-8)).any(|x|at(x,y).is_some_and(|p|p.visible() && Some(p.color)!=body))
+    });
     let last=text.map_or(t+24,|y|y+1).max(t+24);
     ((last+4-t+7)/8*8).min(b-8-t)
 }
@@ -100,7 +114,8 @@ pub fn pieces(bus:&MemMap,band:Band,index:usize,menu:Option<[i32;4]>)->Vec<Layou
         // Blocks entirely beside the native screen are invisible on the original
         // (the shop parks stat digits at x -24) and must stay so.
         let blocks:Vec<_>=canvas_blocks(&state.pixels).into_iter().filter(|(b,_)|b[2]>0 && b[0]<240).collect();
-        let placed:Vec<_>=blocks.iter().map(|&(b,c)|(b,dock_for(state,menu,b,c))).collect();
+        let lists=matches!(gba_core::ffta_shop_mouse::handler_step(bus),Some((1|2,step)) if step>=23);
+        let placed:Vec<_>=blocks.iter().map(|&(b,c)|(b,dock_for(state,menu,lists,b,c))).collect();
         return Layout::docked(band,state.style.scale,&placed);
     }
     if docked && index==1 && state.shop_layout && state.extra.kind==PanelKind::Info {
@@ -335,12 +350,17 @@ impl Engine {
     /// the selected item chooses it (A), like the Buy/Sell button. Returns
     /// false off the list's rows (tabs, other windows).
     fn shop_list_tap(&mut self,x:f32,y:f32)->bool{
-        if crate::engine::shop_list_cursor(&self.machine.bus).is_none() {return false;}
+        // The list (not its blinking pointer) decides.
+        if gba_core::ffta_shop_mouse::shop_list(&self.machine.bus).is_none() && crate::engine::shop_list_cursor(&self.machine.bus).is_none() {return false;}
         let Some(scene)=battle::MenuScene::read(&self.machine.bus) else {return false};
         let Some(target)=scene.hit(x,y) else {return false};
+        // Choosing takes a tap well inside the selected row, not on its edges.
+        let within=y-(scene.origin[1]+target as i32*16) as f32;
+        if target==scene.selected && !(3. ..12.).contains(&within) {return true;}
         self.mouse.cancel();
         if target==scene.selected {battle::press(&mut self.machine.bus,0x3fe);}
-        else {battle::menu_select(&mut self.machine.bus,target,false);}
+        // Straight to the item (the game's own Up/Down, entered with that row).
+        else if !gba_core::ffta_shop_mouse::select_row(&mut self.machine.bus,target) {battle::menu_select(&mut self.machine.bus,target,false);}
         true
     }
     /// A tap on a unit in the party picture: on the roster the game's cursor

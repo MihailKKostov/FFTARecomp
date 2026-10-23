@@ -9,7 +9,11 @@ struct Request { base:usize,slot:u8,source:u8,ids:[u8;6],count:u8,deadline:u64,c
 #[derive(Default)]
 pub(crate) struct State { profile:Option<Profile>,request:Option<Request>,deferred:Option<(f32,f32,bool)>,
     /// A quantity being set (`set_quantity`); kept through the menu cancels, ended by physical input.
-    pub(crate) quantity:Option<QuantityRequest> }
+    pub(crate) quantity:Option<QuantityRequest>,
+    /// A shop list row being selected (`select_row`), likewise.
+    pub(crate) row:Option<RowRequest> }
+#[derive(Clone,Copy)]
+pub(crate) struct RowRequest { cursor:usize, target:u8, deadline:u64, committed:bool }
 #[derive(Clone,Copy)]
 pub(crate) struct QuantityRequest { target:u8, deadline:u64, committed:bool }
 impl State {
@@ -23,13 +27,14 @@ impl State {
             end:0x0800003c+start as u32,inventory:0x08000001+inventory as u32,
             handlers:match version {Version::Usa=>[0x08069659,0x0806b6d1],Version::Europe=>[0x0806bb0d,0x0806db7d]},
             menu:(version==Version::Usa && rom.get(0x68c10..0x68c18)==Some(&[0xf0,0xb5,0x4f,0x46,0x46,0x46,0xc0,0xb4])).then_some(0x08068c11)}),
-            request:None,deferred:None,quantity:None}
+            request:None,deferred:None,quantity:None,row:None}
     }
     pub(crate) fn cancel(&mut self) {self.request=None;self.deferred=None;}
     pub(crate) fn pending(&self)->bool {self.request.is_some()}
     pub(crate) fn interprets(&self,pc:u32)->bool {
         (self.request.is_some() && self.profile.is_some_and(|p|(p.start..p.end).contains(&pc)))
             || (self.quantity.is_some_and(|q|!q.committed) && (QUANTITY_CODE.0..QUANTITY_CODE.1).contains(&pc))
+            || (self.row.is_some_and(|r|!r.committed) && (ROW_CODE.0..ROW_CODE.1).contains(&pc))
     }
 }
 fn half(b:&[u8],o:usize)->Option<u16>{Some(u16::from_le_bytes(b.get(o..o+2)?.try_into().ok()?))}
@@ -65,6 +70,16 @@ fn context(mem:&MemMap)->Option<Context> {
 /// Every other step is a transition.
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub enum ShopPhase { Menu, List{sell:bool}, Quantity{sell:bool}, Confirm{sell:bool}, Message, Busy }
+/// The running shop handler (0 the menu, 1 Buy, 2 Sell) and its step.
+pub fn handler_step(mem:&MemMap)->Option<(u8,u8)> {
+    let p=mem.ffta_battle_mouse.shop.profile?;
+    let menu=p.menu?;
+    let manager=word(&mem.ewram,0xf428)?.checked_sub(0x02000000)? as usize;
+    let handler=word(&mem.ewram,manager.checked_add(0x148c)?)?;
+    let step=*mem.ewram.get(manager+0x1490)?;
+    if handler==menu {return Some((0,step));}
+    Some((1+p.handlers.iter().position(|&h|h==handler)? as u8,step))
+}
 pub fn phase(mem:&MemMap)->Option<ShopPhase> {
     let p=mem.ffta_battle_mouse.shop.profile?;
     let menu=p.menu?;
@@ -218,8 +233,46 @@ fn quantity_entry(m:&mut Machine) {
     m.cpu.regs[0]=q.target as u32;
     m.bus.ffta_battle_mouse.shop.quantity=Some(QuantityRequest{committed:true,..q});
 }
+/// The shop lists' Down and Up (USA, a list owner in r9, its cursor at
+/// r9+0x4c, the shown row at r9+0x5d) compute the next row into r6 and then
+/// check it, play the cursor sound and set the cursor from it: the tapped row
+/// is put there instead, so the cursor moves straight to it. The handler
+/// (0x08029f7c) has two ways: scrolling lists (0x08029fe2, 0x0802a06c) and
+/// ones that wrap around instead (0x0802a118, 0x0802a172). It is interpreted
+/// from its entry: once compiled, its blocks start there.
+const ROW_NEXT:[u32;4]=[0x08029fe2,0x0802a06c,0x0802a118,0x0802a172];
+const ROW_CODE:(u32,u32)=(0x08029f7c,0x0802a190);
+fn row_code(mem:&MemMap)->bool {
+    mem.ffta_battle_mouse.shop.profile.is_some_and(|p|p.menu.is_some())
+        && mem.rom.get(0x29f7c..0x29f80)==Some(&[0xf0,0xb5,0x57,0x46]) && mem.rom.get(0x29fe0..0x29fe4)==Some(&[0x06,0x0e,0x37,0x06]) && mem.rom.get(0x2a06a..0x2a06e)==Some(&[0x06,0x0e,0x35,0x06])
+        && [0x2a118,0x2a172].iter().all(|&o|mem.rom.get(o..o+4)==Some(&[0x34,0x06,0x56,0x45]))
+}
+/// Moves the shop list's cursor straight to shown row `row` (one Up or Down
+/// of the game's own). False where that is not this game's list.
+pub fn select_row(mem:&mut MemMap,row:u8)->bool {
+    if !mem.ffta_battle_mouse.enabled || !row_code(mem) {return false;}
+    let Some(l)=shop_list(mem) else {return false};
+    if row>=l.visible || l.first as u32+row as u32>=l.count as u32 {return false;}
+    if row==l.row {return true;}
+    if !crate::ffta_battle_mouse::press(mem,if row>l.row {0x37f}else{0x3bf}) {return false;}
+    mem.ffta_battle_mouse.shop.row=Some(RowRequest{cursor:l.list+0x20,target:row,deadline:mem.frames+20,committed:false});
+    true
+}
+/// A row selection is waiting for the game's list.
+pub fn row_pending(mem:&MemMap)->bool {
+    mem.ffta_battle_mouse.shop.row.is_some_and(|r|!r.committed && mem.frames<=r.deadline)
+}
+fn row_entry(m:&mut Machine) {
+    let pc=m.cpu.regs[15];
+    if !ROW_NEXT.contains(&pc) {return;}
+    let Some(r)=m.bus.ffta_battle_mouse.shop.row.filter(|r|!r.committed) else {return};
+    if m.bus.frames>r.deadline {m.bus.ffta_battle_mouse.shop.row=None;return;}
+    if m.cpu.regs[9].wrapping_add(0x4c)!=0x02000000+r.cursor as u32 {return;}
+    m.cpu.regs[6]=r.target as u32;
+    m.bus.ffta_battle_mouse.shop.row=Some(RowRequest{committed:true,..r});
+}
 pub(crate) fn entry(m:&mut Machine) {
-    if m.bus.ffta_battle_mouse.enabled {quantity_entry(m);}
+    if m.bus.ffta_battle_mouse.enabled {quantity_entry(m);row_entry(m);}
     let s=&m.bus.ffta_battle_mouse;
     let Some(p)=s.shop.profile.filter(|_|s.enabled)else{return;};
     if m.cpu.regs[15]!=p.commit {return;}
@@ -239,6 +292,29 @@ pub fn scroll(mem:&mut MemMap,up:bool)->bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn list_down_and_up_enter_the_tapped_row() {
+        let mut m=Machine::new(vec![]);
+        let cursor=0x2443c;
+        // Both ways of the list (scrolling, wrapping), Down and Up: r6 holds the next row.
+        for pc in ROW_NEXT {
+            m.bus.ffta_battle_mouse.shop.row=Some(RowRequest{cursor,target:3,deadline:10,committed:false});
+            assert!(row_pending(&m.bus) && m.bus.ffta_battle_mouse.shop.interprets(ROW_CODE.0));
+            m.cpu.regs[15]=pc;m.cpu.regs[6]=1;m.cpu.regs[9]=0x02000000+cursor as u32-0x4c;
+            row_entry(&mut m);
+            assert_eq!(m.cpu.regs[6],3);
+            assert!(!row_pending(&m.bus) && !m.bus.ffta_battle_mouse.shop.interprets(ROW_CODE.0));
+        }
+        // Another list's owner is left alone; so is a request past its deadline.
+        m.bus.ffta_battle_mouse.shop.row=Some(RowRequest{cursor,target:3,deadline:10,committed:false});
+        m.cpu.regs[6]=1;m.cpu.regs[9]=0x02000000;
+        row_entry(&mut m);
+        assert_eq!(m.cpu.regs[6],1);
+        m.bus.frames=11;m.cpu.regs[9]=0x02000000+cursor as u32-0x4c;
+        row_entry(&mut m);
+        assert_eq!(m.cpu.regs[6],1);
+        assert!(m.bus.ffta_battle_mouse.shop.row.is_none());
+    }
     fn fixture(version:Version,sell:bool)->Machine {
         let mut m=Machine::new(vec![]);m.cpu.cpsr=0x3f;
         let start=if version==Version::Europe {0x71490}else{0x6efa8};

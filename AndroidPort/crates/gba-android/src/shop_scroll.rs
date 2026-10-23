@@ -262,9 +262,16 @@ impl Engine {
                 self.machine.bus.ffta_battle_mouse.silence_cursor = false;
                 if let Some(key) = self.shop_scroll.deferred.take() { self.press_button(key); }
             } else if !s.dragging && !battle::busy(&self.machine.bus) {
-                let key = if l.first < first { DOWN } else if l.first > first { UP } else if l.row < row { DOWN } else { UP };
-                self.machine.bus.ffta_battle_mouse.silence_cursor = true;
-                battle::press_quick(&mut self.machine.bus, key);
+                // Inside the shown rows the cursor goes straight there; past them
+                // it scrolls from the edge row, a short Up/Down a row.
+                let bus = &mut self.machine.bus;
+                bus.ffta_battle_mouse.silence_cursor = true;
+                let edge = if l.first < first { l.visible - 1 } else { 0 };
+                let jump = if l.first == first { Some(row) } else if l.row != edge { Some(edge) } else { None };
+                if !jump.is_some_and(|r| shop::select_row(bus, r)) {
+                    let key = if l.first < first { DOWN } else if l.first > first { UP } else if l.row < row { DOWN } else { UP };
+                    battle::press_quick(bus, key);
+                }
             }
         } else if !s.busy() {
             s.pos = l.first as f32 * ROW as f32;
@@ -437,8 +444,17 @@ impl Engine {
         let item = item as u16;
         let first = (s.pos / ROW as f32).round() as u16;
         if s.target.is_none() && first == l.first {
-            // The game shows these rows: its own selection.
-            self.tap(x, y, false);
+            // The game shows these rows: the selected item is chosen, another
+            // selected straight away (the game's own Up/Down, entered with its row).
+            let row = (item - l.first) as u8;
+            // Choosing takes a tap well inside the selected row (not its edges,
+            // where a tap for the category tabs or a neighbour can land).
+            let within = ny - (s.top + row as i32 * ROW) as f32;
+            if row == l.row && !(4. ..13.).contains(&within) { return; }
+            self.mouse.cancel();
+            let bus = &mut self.machine.bus;
+            if row == l.row { battle::press(bus, 0x3fe); }
+            else if !shop::select_row(bus, row) { battle::menu_select(bus, row, false); }
             return;
         }
         let row = item.saturating_sub(first).min(l.visible as u16 - 1) as u8;
