@@ -241,6 +241,7 @@ impl Engine {
         if self.menu_layout.is_some() {return row(&bus.rom,236,&[("Return",if party_status(bus) {PARTY_CLOSE} else {back},false)]);}
         if self.town_buttons() {
             if let Some(phase)=gba_core::ffta_shop_mouse::phase(bus) {return self.shop_buttons(phase);}
+            if let Some(buttons)=self.pub_buttons() {return buttons;}
             // Menus offering Leave (the town root menus) have no Return; lists
             // and other sub-menus (a menu pointer, no root menu) do.
             if bus.ffta_dialogue.town_layout || party_cursor(bus).is_none() {return Vec::new();}

@@ -239,6 +239,10 @@ impl Engine {
         if self.laws.screen_banner.is_some_and(|(a,b)|py>=a && py<b) {self.mouse.cancel();self.laws.toggle();return;}
         if self.laws.open {self.laws.open=false;return;}
         if self.quantity_tap(x,y) {return;}
+        // Dialogue waiting for a button moves on with a tap anywhere, also with a menu shown.
+        if self.touch_enabled && self.machine.bus.ffta_dialogue.docked && crate::pub_touch::continue_arrow(&self.machine.bus) {
+            self.mouse.cancel();battle::press(&mut self.machine.bus,0x3fe);return;
+        }
         let band=self.ui_band();
         let state=&self.machine.bus.ffta_dialogue;
         let index=if matches!(state.extra.kind,PanelKind::Actions|PanelKind::Notice)&&state.extra.active(){Some(1)}
@@ -255,8 +259,10 @@ impl Engine {
                         nx+=if b[0]+b[2]>=240{d}else{-d};
                     }
                 }
+                if self.town_buttons() && self.pub_tap(nx,ny) {return;}
                 if self.shop_list_tap(nx,ny) {return;}
                 handled=battle::aim(&mut self.machine.bus,nx,ny,true);
+                if !handled && self.town_buttons() && self.pointer_menu_tap(nx,ny) {return;}
             }
         }else{
             let nx=(px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32-mem::extra() as f32;

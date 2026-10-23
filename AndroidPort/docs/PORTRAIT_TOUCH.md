@@ -126,6 +126,40 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.52-android-preview
+
+**The pub by touch** (`pub_touch.rs`). The pub's mission screens and
+notices show no menu pointer, so taps did nothing there and the player was
+stuck. Now, touch-only portrait:
+- Dialogue waiting for a button (its arrow shown, 8x16, palette 2, tile
+  0x122) moves on with a tap anywhere, also while a menu is shown
+  (rumors, the barkeep's lines about mission items).
+- A rumor's text (a window titled RUMORS: BG2 title of six tiles from
+  0xc03e between the window's 0xc007 and 0xc008 edges, no pointer) moves on
+  with a tap anywhere; on its last page (no arrow) the tap closes it.
+- Mission details (the game's page arrows in the top corners: OAM tile
+  0x12b, palette 1, 16x16, rows 0-15): a sideways swipe turns pages (left:
+  next), the page arrows turn them by tap, and OK (A: take the mission, or
+  go on to accepting it) and Return (B: back to the list) are in the bottom
+  row.
+- Notices ("Accept these conditions?", a window titled NOTICE: BG3 tiles
+  0xb04a-0xb04d; Yes / No three rows under the title, measured title at
+  tile column 3, row 2, Yes at x 31): Yes (A) and No (B) by tapping them or
+  the Yes / No buttons. The game's ring left of Yes blinks and never moves;
+  it is not used to find them.
+- A menu with the game's pointer the other adapters do not know (the
+  mission item slots "<--->", "<--->", "OK", pointer right of the text): a
+  tap on a row moves the pointer there with Up/Down, then A.
+
+Measured, touch only: Rumors, a rumor through its pages and closed; a
+mission's three pages by swipe and by its arrows; OK, the barkeep's lines,
+the item slots' OK, the fee page's OK, the notice: No back to the fee page,
+Yes takes the mission (Clan Funds 5000 to 4700).
+
+Not a problem after all: a tap at the lower edge of the world map town
+menu's Pub row selects Shop because the game's rows are 16 high and that
+is where Shop's starts (rows measured 56-72, 72-88, 88-104).
+
 ## 0.51-android-preview
 
 **Laws across a month change.** A month has 20 days (measured: EWRAM

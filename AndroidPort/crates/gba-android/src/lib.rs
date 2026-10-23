@@ -11,6 +11,7 @@ pub mod touch;
 mod gestures;
 mod shop_scroll;
 mod laws;
+mod pub_touch;
 mod title_touch;
 mod world_map;
 pub mod game_buttons;

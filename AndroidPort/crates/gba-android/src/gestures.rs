@@ -20,9 +20,10 @@ pub(crate) enum Gesture {
     /// native point at the start, `anchor` the list's native centre (for mapping
     /// later points), `samples` recent (frame, native point) for the speed.
     Shop { start: (f32, f32), native: (f32, f32), anchor: [i32; 2], vertical: Option<bool>, start_pos: f32, samples: [(u64, f32, f32); 2] },
-    /// A unit's status screen: a sideways swipe shows the next unit (to the
-    /// left) or the one before (to the right), like turning a page, once per
-    /// swipe; `moved` once the finger clearly moved (no tap then).
+    /// A unit's status screen (or the pub's mission pages): a sideways swipe
+    /// shows the next unit or page (to the left) or the one before (to the
+    /// right), the game's Right and Left, once per swipe; `moved` once the
+    /// finger clearly moved (no tap then).
     Unit { start: (f32, f32), moved: bool, switched: bool },
     /// The world map's law list follows the finger (`scroll` at the start).
     Laws { start: (f32, f32), scroll: f32, moved: bool },
@@ -130,7 +131,9 @@ impl Engine {
             self.gesture = Some(Gesture::Party { start: (x, y), last_y: y, moved: false });
             return true;
         }
-        if self.menu_layout.is_some() && crate::engine::party_status(&self.machine.bus) {
+        // Unit status screens, and the pub's mission pages: sideways swipes turn.
+        let pages = self.town_buttons() && crate::pub_touch::mission_pages(&self.machine.bus) && crate::pub_touch::notice(&self.machine.bus).is_none();
+        if (self.menu_layout.is_some() && crate::engine::party_status(&self.machine.bus)) || pages {
             self.gesture = Some(Gesture::Unit { start: (x, y), moved: false, switched: false });
             return true;
         }
