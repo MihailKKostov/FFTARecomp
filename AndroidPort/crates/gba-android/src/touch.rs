@@ -47,8 +47,10 @@ pub fn canvas_blocks(pixels:&[dialogue::UiPixel])->Vec<([i32;4],(usize,usize))>{
 /// `lists`: a Buy or Sell list is up (the shop menu cannot be sliding then).
 fn dock_for(state:&dialogue::DialogueState,menu:Option<[i32;4]>,lists:bool,block:[i32;4],(y0,y1):(usize,usize))->Dock{
     // A speech bubble is anchored to a screen edge in the upper rows, also while
-    // it opens or closes (shop lists open from the top rows but never touch an edge).
-    let bubble=(block[0]<=0 || block[2]>=240) && y1<=72;
+    // it opens or closes (shop lists open from the top rows but never touch an
+    // edge). Its continuation arrow bobs below it (measured: its bottom row 67
+    // to 73), so one starting in the top rows is one whatever its bottom.
+    let bubble=(block[0]<=0 || block[2]>=240) && (y1<=72 || y0<=16);
     if state.shop_layout && lists {
         // Inside the lists every window keeps its place (a panel closing at
         // the left edge is not the shop menu sliding).
@@ -428,5 +430,22 @@ impl Engine {
                 for(out,&pixel)in background.iter_mut().zip(&state.extra.background){*out=super::engine::rgba_colors()[(pixel&0x7fff) as usize];}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dock_tests {
+    use super::*;
+    #[test]
+    fn a_top_bubble_stays_on_top_while_its_arrow_bobs_below_it() {
+        let mut state=dialogue::DialogueState::default();
+        state.shop_layout=true;
+        // The barkeep's bubble (right edge, rows 1-67), its arrow down to row 73.
+        for bottom in [67,72,73] {
+            assert_eq!(dock_for(&state,None,false,[3,1,240,bottom],(1,bottom as usize)),Dock::Top);
+        }
+        // Speakers' bubbles low on the screen and the shop's lists stay below.
+        assert_eq!(dock_for(&state,None,false,[0,104,180,152],(104,152)),Dock::Bottom);
+        assert_eq!(dock_for(&state,None,false,[8,10,232,120],(10,120)),Dock::Bottom);
     }
 }

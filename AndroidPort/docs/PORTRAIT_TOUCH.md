@@ -126,6 +126,18 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.54-android-preview
+
+**Top speech bubbles stay on top.** A bubble anchored to a screen edge in
+the top rows is docked at the top; that was decided by its block ending by
+native row 72. Its continuation arrow bobs below it (measured: the
+barkeep's bubble ends on row 67 to 73 with it), so on the frames where the
+arrow was lowest the bubble counted as a lower window and jumped to the
+bottom dock, then back: the barkeep's lines after taking a mission snapped
+between top and middle of the screen. A block touching an edge that starts
+by row 16 is now a top bubble whatever its bottom. Measured: the lines from
+the mission's details to its notice stay on top on every frame.
+
 ## 0.53-android-preview
 
 **Return on a rumor.** A rumor's text has a Return button: it closes the
