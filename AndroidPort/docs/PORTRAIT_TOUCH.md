@@ -126,6 +126,37 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.44-android-preview
+
+**A border between the party and the unit.** Across the screen above the
+unit's screen runs the game's own rule from under a unit's header (BG1 tile
+0xa8, palette 12: a yellow-green line in a dark outline, read from VRAM,
+where it is loaded on every Party screen). The party grid ends above it.
+
+**The Party screens open on the first unit.** Opened from the map, the
+roster's cursor goes to unit No. 1 once the roster has settled and A opens
+its status screen (a status screen reached first, as when resuming there,
+cancels it). Their first frames still read as a unit screen, so opening is
+told by the screens appearing, not by the roster.
+
+**Return closes them.** On a unit's status screen (its MENU is the game's
+cursor graph of four entries at x 143; Equip and Abilities have theirs at
+x 0) the Return button presses B and, once the roster is back, B again.
+On Equip, Abilities and the other unit screens Return still goes back to
+the status screen, and the device's own B still steps back one screen.
+
+**The roster's hint bar from a status screen.** L Change, Start Item List
+and R Sort go back to the roster (B) and press their key once it has
+settled for 24 frames (measured: Start ignored 30 frames after B, taken
+at 45).
+
+**Swipes between units turn like pages.** On a status screen the engine
+follows the finger: a sideways swipe shows the next unit (swiped left) or
+the one before (swiped right), once per swipe, with the game's own Right
+and Left; a finger lifted without moving is a tap. Before, a drag held the
+D-pad direction it pointed to (right showed the next unit). A second finger
+ends the swipe and still makes a two-finger tap B (also on shop lists).
+
 ## 0.43-android-preview
 
 **Category tabs work after item Info closes.** Item Info leaves WIN1 on but

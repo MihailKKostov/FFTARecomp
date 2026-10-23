@@ -70,7 +70,11 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                 followed=touchOnly && runCatching{NativeBridge.gbaPointerDown(event.x/width,event.y/height,slop)}.getOrDefault(false)
             }
             MotionEvent.ACTION_POINTER_DOWN->
-                if(followed){NativeBridge.gbaPointerUp(event.x/width,event.y/height,true);followed=false;touchingGame=false}
+                if(followed){
+                    // A second finger: the engine's gesture ends, and a quick two-finger tap is still B.
+                    NativeBridge.gbaPointerUp(event.x/width,event.y/height,true);followed=false
+                    if(touchingGame && event.pointerCount==2)twoFinger=true else touchingGame=false
+                }
                 else if(touchOnly && touchingGame && !dragging && event.pointerCount==2)twoFinger=true
                 else {touchingGame=false;onDirection(0)}
             MotionEvent.ACTION_MOVE->if(touchOnly && touchingGame && !twoFinger){

@@ -183,6 +183,21 @@ impl MenuLayout {
 
 fn half(data: &[u8], offset: usize) -> i32 { u16::from_le_bytes([data[offset], data[offset + 1]]) as i32 }
 
+/// The game's rule under a unit's header (BG1 tile 0xa8, palette 12: a
+/// yellow-green line in a dark outline, 5 of its 8 rows), loaded on every
+/// Party screen. None if the tile is not there.
+fn separator(bus: &MemMap) -> Option<Vec<u16>> {
+    let char_base = ((half(&bus.io, 0x0a) >> 2) & 3) as usize * 0x4000;
+    let tile = bus.vram.get(char_base + 0xa8 * 32..char_base + 0xa9 * 32)?;
+    if tile[..4] != [0x11; 4] || tile[16..] != [0x11, 0x11, 0x11, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] { return None; }
+    Some((0..64).map(|i| {
+        let index = (tile[i / 2] >> (4 * (i & 1))) & 15;
+        if index == 0 { TRANSPARENT } else { half(&bus.palette, (12 * 16 + index as usize) * 2) as u16 }
+    }).collect())
+}
+/// Rows from the separator's top to the unit screen below it.
+const SEPARATOR_GAP: i32 = 9;
+
 /// Draws the Party screen into `pixels` (the background pattern everywhere).
 pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut Option<PartyCache>, scroll: &mut i32) -> Option<MenuLayout> {
     let screen = &bus.menu_screen;
@@ -233,8 +248,13 @@ pub fn present(bus: &MemMap, pixels: &mut [i32], dock: (i32, i32), cache: &mut O
     };
     // Upper half: the party grid, the selection under the unit selected now.
     let all = (i32::MIN / 2, i32::MAX / 2);
+    // Between the party and the unit: the game's header rule, across the screen.
+    let rule = lower_shift - SEPARATOR_GAP;
+    if let Some(tile) = separator(bus) {
+        for x in (-ex..rw as i32 - ex).step_by(8) { blit(&tile, 8, x, rule, false, all); }
+    }
     let grid = cache.as_ref().filter(|c| c.count() > 0).map(|kept| {
-        let mut grid = PartyGrid { top: top + 4, bottom: (top + bottom) / 2, count: kept.count(), scroll: 0 };
+        let mut grid = PartyGrid { top: top + 4, bottom: ((top + bottom) / 2).min(rule - 2), count: kept.count(), scroll: 0 };
         *scroll = (*scroll).clamp(0, grid.max_scroll());
         grid.scroll = *scroll;
         let area = grid.area();

@@ -1,7 +1,8 @@
 //! Touch-only gestures the engine follows from finger down to up (the app
 //! sends them instead of taps when `pointer_down` claims the finger):
-//! dragging the party grid, holding the shop's quantity arrows. A finger that
-//! is lifted without moving is a tap.
+//! dragging the party grid, holding the shop's quantity arrows, swiping
+//! between units on a status screen. A finger that is lifted without moving
+//! is a tap.
 use crate::engine::Engine;
 use crate::touch::pieces;
 use crate::ui_layout::Layout;
@@ -19,6 +20,10 @@ pub(crate) enum Gesture {
     /// native point at the start, `anchor` the list's native centre (for mapping
     /// later points), `samples` recent (frame, native point) for the speed.
     Shop { start: (f32, f32), native: (f32, f32), anchor: [i32; 2], vertical: Option<bool>, start_pos: f32, samples: [(u64, f32, f32); 2] },
+    /// A unit's status screen: a sideways swipe shows the next unit (to the
+    /// left) or the one before (to the right), like turning a page, once per
+    /// swipe; `moved` once the finger clearly moved (no tap then).
+    Unit { start: (f32, f32), moved: bool, switched: bool },
 }
 
 /// Quantity arrows beside the game's quantity window (native, from WIN1).
@@ -118,6 +123,10 @@ impl Engine {
             self.gesture = Some(Gesture::Party { start: (x, y), last_y: y, moved: false });
             return true;
         }
+        if self.menu_layout.is_some() && crate::engine::party_status(&self.machine.bus) {
+            self.gesture = Some(Gesture::Unit { start: (x, y), moved: false, switched: false });
+            return true;
+        }
         false
     }
     pub fn pointer_move(&mut self, x: f32, y: f32) {
@@ -129,6 +138,18 @@ impl Engine {
                 let moved = moved || ((y - start.1) * h).abs() >= self.gesture_slop / 3.;
                 if moved { self.party_drag(y - last_y); }
                 self.gesture = Some(Gesture::Party { start, last_y: if moved { y } else { last_y }, moved });
+            }
+            Some(Gesture::Unit { start, moved, switched }) => {
+                let (dx, dy) = ((x - start.0) * w, (y - start.1) * h);
+                let moved = moved || dx.hypot(dy) >= self.gesture_slop;
+                // The game's own unit switch: Right shows the next unit, Left the one before.
+                let switch = !switched && dx.abs() >= self.gesture_slop && dx.abs() >= dy.abs();
+                if switch {
+                    self.mouse.cancel();
+                    self.party_goal = None;
+                    battle::press(&mut self.machine.bus, if dx < 0. { 0x3ef } else { 0x3df });
+                }
+                self.gesture = Some(Gesture::Unit { start, moved, switched: switched || switch });
             }
             Some(Gesture::Quantity { start, .. }) => {
                 // Sliding off the arrow ends the hold.
@@ -162,7 +183,7 @@ impl Engine {
         let gesture = self.gesture.take();
         if cancel { return; }
         match gesture {
-            Some(Gesture::Party { start, moved: false, .. }) => self.tap(start.0, start.1, false),
+            Some(Gesture::Party { start, moved: false, .. } | Gesture::Unit { start, moved: false, .. }) => self.tap(start.0, start.1, false),
             Some(Gesture::Shop { start, native, vertical: None, .. }) => self.shop_rows_tap(start.0, start.1, native.0, native.1),
             Some(Gesture::Shop { native, vertical: Some(vertical), samples: [(f0, x0, y0), (f1, x1, y1)], anchor, .. }) => {
                 let frames = (f1.saturating_sub(f0)).max(1) as f32;

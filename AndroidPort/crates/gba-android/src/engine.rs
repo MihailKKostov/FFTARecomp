@@ -11,6 +11,20 @@ pub fn status(message: impl Into<String>) { *STATUS.lock().unwrap_or_else(|e| e.
 /// unit index the game derives from them.
 const PARTY_COLUMN:usize=0xfd29;
 const PARTY_INDEX:usize=0xfd3e;
+/// The Return button on a unit's status screen: leaves the Party screens
+/// (B to the roster, then B again).
+pub(crate) const PARTY_CLOSE:u16=1;
+/// Frames the roster is shown settled before its hint bar keys are taken
+/// (measured: Start ignored 30 frames after B from a status screen, taken at 45).
+const ROSTER_SETTLE:u32=24;
+
+/// A unit's status screen (the top unit screen): its MENU (Equip Items, Pick
+/// Abilities, Change Jobs, Leave Clan) is the game's cursor graph of four
+/// entries at x 143 (measured USA; Equip and Abilities have theirs at x 0).
+pub(crate) fn party_status(bus:&gba_core::mem::MemMap)->bool{
+    bus.menu_screen.frame && bus.menu_screen.template==gba_core::menu_screen::Template::Unit
+        && gba_core::ffta_graph_menu::GraphMenu::read(bus).is_some_and(|m|m.count==4 && m.entry(bus,0).x>=128)
+}
 
 #[derive(Clone,Copy)]
 pub(crate) struct PartyGoal {
@@ -72,6 +86,14 @@ pub struct Engine {
     pub(crate) party_goal: Option<PartyGoal>,
     /// Native rows the party grid is scrolled by (menu_layout.rs).
     pub(crate) party_scroll: i32,
+    /// The Party screens were shown last frame; they opened on the roster and
+    /// its first unit is still to be opened; Return is leaving them (until);
+    /// a roster hint bar key waits for the roster to take input (key, until,
+    /// frames it has been settled).
+    party_shown: bool,
+    party_open_first: bool,
+    party_leave: Option<u64>,
+    party_bar: Option<(u16,u64,u32)>,
     /// Town root menu (item count, selected item) last shown: names the shop list's button.
     shop_choice: (u8,u8),
     /// Last battery save written, and the frame of the last resume state.
@@ -210,7 +232,7 @@ impl Engine {
             let w=crate::game_buttons::width(&bus.rom,"Menu");
             return row(&bus.rom,110+w/2,&[("Menu",if open {back} else {start},open)]);
         }
-        if self.menu_layout.is_some() {return row(&bus.rom,236,&[("Return",back,false)]);}
+        if self.menu_layout.is_some() {return row(&bus.rom,236,&[("Return",if party_status(bus) {PARTY_CLOSE} else {back},false)]);}
         if self.town_buttons() {
             if let Some(phase)=gba_core::ffta_shop_mouse::phase(bus) {return self.shop_buttons(phase);}
             // Menus offering Leave (the town root menus) have no Return; lists
@@ -283,6 +305,50 @@ impl Engine {
         if let Some(path)=self.prefs_path() {
             if let Err(e)=write_atomic(&path,format!("shop_info={}\n",self.shop_info as u8).as_bytes()) {status(format!("Settings not saved: {e}"));}
         }
+    }
+    /// Party screens opened from the map: the first unit's status opens as
+    /// soon as the roster has settled (its cursor moves there, then A). Return
+    /// on a status screen leaves: the roster it goes back to is closed too.
+    fn drive_party_flow(&mut self){
+        let Some(layout)=self.menu_layout else {return};
+        let bus=&mut self.machine.bus;
+        if let Some(until)=self.party_leave {
+            if bus.frames>until {self.party_leave=None;}
+            else if layout.roster_live && battle::idle(bus) {battle::press(bus,0x3fd);self.party_leave=None;}
+            return;
+        }
+        if let Some((key,until,settled))=self.party_bar {
+            // The roster takes its keys a few frames after it is drawn.
+            let settled=if layout.roster_live {settled+1} else {0};
+            self.party_bar=Some((key,until,settled));
+            if bus.frames>until {self.party_bar=None;}
+            else if settled>=ROSTER_SETTLE && battle::idle(bus) {battle::press(bus,key);self.party_bar=None;}
+            return;
+        }
+        if self.party_open_first && party_status(bus) {self.party_open_first=false;}
+        if self.party_open_first && layout.roster_live && self.party_goal.is_none() {
+            self.party_open_first=false;
+            self.party_goal=Some(PartyGoal{target:0,confirm:true,deadline:bus.frames+600,pressed:None,cursor:[0;4],still:0,row:None,graph:None,list:None});
+        }
+    }
+    /// The roster's hint bar (L Change, Start Item List, R Sort): on the roster
+    /// its key; on a status screen back to the roster (B), then the key.
+    pub(crate) fn party_bar(&mut self,key:u16,roster:bool){
+        self.mouse.cancel();
+        self.party_goal=None;
+        self.party_open_first=false;
+        if roster {battle::press(&mut self.machine.bus,key);}
+        else if party_status(&self.machine.bus) {
+            battle::press(&mut self.machine.bus,0x3fd);
+            self.party_bar=Some((key,self.machine.bus.frames+300,0));
+        }
+    }
+    /// Leaves the Party screens from a unit's status screen (`PARTY_CLOSE`).
+    pub(crate) fn leave_party(&mut self){
+        self.party_goal=None;
+        self.party_open_first=false;
+        battle::press(&mut self.machine.bus,0x3fd);
+        self.party_leave=Some(self.machine.bus.frames+300);
     }
     /// Moves the game's unit selection (EWRAM 0xfd3e) to a tapped unit with
     /// its own Left/Right, one press at a time: the cursor and the unit screen
@@ -404,7 +470,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -488,6 +554,7 @@ impl Engine {
         let count=count.clamp(1,8);
         self.drive_gestures();
         self.shop_scroll_tick()?;
+        self.drive_party_flow();
         for index in 0..count {
             self.drive_party_goal();
             let m = &mut *self.machine;
@@ -536,6 +603,12 @@ impl Engine {
             self.view_shift=crate::world_map::WorldMap::shift(&self.machine.bus);
         }
         self.menu_layout=if expanded_rows {crate::menu_layout::present(&self.machine.bus,&mut self.pixels,dock,&mut self.party_cache,&mut self.party_scroll)}else{None};
+        let shown=self.menu_layout.is_some();
+        // Their first frames can still read as a unit screen: a status screen
+        // reached before the roster settles (resuming there) cancels it.
+        if shown && !self.party_shown {self.party_open_first=true;}
+        if !shown {self.party_open_first=false;self.party_leave=None;self.party_bar=None;}
+        self.party_shown=shown;
         self.shop_scroll_present();
         self.draw_quantity_arrows();
         let buttons=self.scene_buttons();
