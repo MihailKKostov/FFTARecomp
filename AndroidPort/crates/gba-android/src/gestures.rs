@@ -30,7 +30,22 @@ pub(crate) enum Gesture {
     /// Dialogue: a tap moves it on; held (`since` the frame it touched), it
     /// is hurried (`text_speed`), `arrow` the frame its page finished.
     Dialogue { start: (f32, f32), since: u64, arrow: Option<u64> },
+    /// The battlefield follows the finger (the game's camera, `camera` at the
+    /// start); `moved` once it clearly moved (no tap then).
+    Pan { start: (f32, f32), camera: (i16, i16), moved: bool },
+    /// The battle plays on by itself (enemy turns, actions): held (`since`
+    /// the frame it touched), the game runs faster (`TURBO`); a short touch
+    /// is a tap.
+    Turbo { start: (f32, f32), since: u64 },
 }
+
+/// Frames emulated per frame shown while a finger holds the battle on.
+pub(crate) const TURBO: usize = 4;
+
+/// The battle camera's scroll (EWRAM, USA: the projection descriptor at
+/// 0x02007f40 subtracts it from the map's origin). The game clamps it to the
+/// map and keeps it until its cursor moves out of view.
+const CAMERA: usize = 0x7f64;
 
 /// Quantity arrows beside the game's quantity window (native, from WIN1).
 pub(crate) struct QuantityArrows { pub window: [i32; 4] }
@@ -140,8 +155,18 @@ impl Engine {
             self.gesture = Some(Gesture::Unit { start: (x, y), moved: false, switched: false });
             return true;
         }
+        if self.battle_pan() {
+            let e = &self.machine.bus.ewram;
+            let camera = (i16::from_le_bytes([e[CAMERA], e[CAMERA + 1]]), i16::from_le_bytes([e[CAMERA + 2], e[CAMERA + 3]]));
+            self.gesture = Some(Gesture::Pan { start: (x, y), camera, moved: false });
+            return true;
+        }
         if self.dialogue_hold() {
             self.gesture = Some(Gesture::Dialogue { start: (x, y), since: self.machine.bus.frames, arrow: None });
+            return true;
+        }
+        if self.battle_runs() {
+            self.gesture = Some(Gesture::Turbo { start: (x, y), since: self.machine.bus.frames });
             return true;
         }
         false
@@ -198,8 +223,22 @@ impl Engine {
                 }
                 self.gesture = Some(Gesture::Shop { start, native, anchor, vertical, start_pos, samples });
             }
+            Some(Gesture::Pan { start, camera, moved }) => {
+                let (dx, dy) = ((x - start.0) * w, (y - start.1) * h);
+                let moved = moved || dx.hypot(dy) >= self.gesture_slop / 2.;
+                if moved && self.battle_pan() {
+                    // Screen pixels to native: the field's on-screen scale.
+                    let scale = gba_core::mem::render_width() as f32 / self.world_rect[2].max(1.);
+                    let to = |c: i16, d: f32| (c as f32 - d * scale).round().clamp(-1024., 1024.) as i16;
+                    let (cx, cy) = (to(camera.0, dx), to(camera.1, dy));
+                    let e = &mut self.machine.bus.ewram;
+                    e[CAMERA..CAMERA + 2].copy_from_slice(&cx.to_le_bytes());
+                    e[CAMERA + 2..CAMERA + 4].copy_from_slice(&cy.to_le_bytes());
+                }
+                self.gesture = Some(Gesture::Pan { start, camera, moved });
+            }
             // Held anywhere: the finger may slide.
-            Some(Gesture::Dialogue { .. }) | None => {}
+            Some(Gesture::Dialogue { .. } | Gesture::Turbo { .. }) | None => {}
         }
     }
     /// The finger is lifted (or the gesture cancelled).
@@ -207,9 +246,10 @@ impl Engine {
         let gesture = self.gesture.take();
         if cancel { return; }
         match gesture {
-            Some(Gesture::Party { start, moved: false, .. } | Gesture::Unit { start, moved: false, .. }) => self.tap(start.0, start.1, false),
+            Some(Gesture::Party { start, moved: false, .. } | Gesture::Unit { start, moved: false, .. } | Gesture::Pan { start, moved: false, .. }) => self.tap(start.0, start.1, false),
             // Lifted before it hurried: a tap.
             Some(Gesture::Dialogue { start, since, .. }) if self.machine.bus.frames < since + crate::text_speed::HOLD => self.tap(start.0, start.1, false),
+            Some(Gesture::Turbo { start, since }) if self.machine.bus.frames < since + crate::text_speed::HOLD => self.tap(start.0, start.1, false),
             Some(Gesture::Shop { start, native, vertical: None, .. }) => self.shop_rows_tap(start.0, start.1, native.0, native.1),
             Some(Gesture::Shop { native, vertical: Some(vertical), samples: [(f0, x0, y0), (f1, x1, y1)], anchor, .. }) => {
                 let frames = (f1.saturating_sub(f0)).max(1) as f32;
@@ -224,6 +264,33 @@ impl Engine {
             }
             _ => {}
         }
+    }
+    /// A drag may pan the battlefield: the player chooses on it (a cell, a
+    /// command, the facing, units to send), not while the game moves its camera.
+    pub(crate) fn battle_pan(&self) -> bool {
+        let bus = &self.machine.bus;
+        self.usa && self.touch_enabled && bus.ffta_dialogue.docked
+            && (battle::Scene::read(bus).is_some() || battle::facing_center(bus).is_some()
+                || crate::deploy_touch::shown(bus)
+                || (bus.ffta_dialogue.action_layout && battle::MenuScene::read(bus).is_some()))
+    }
+    /// The battle plays on without the player: the field shown, nothing to
+    /// choose or read (no cursor, command, facing, units to send, notice or
+    /// dialogue).
+    pub(crate) fn battle_runs(&self) -> bool {
+        let bus = &self.machine.bus;
+        self.usa && self.touch_enabled && bus.ffta_dialogue.docked && battle::field_shown(bus)
+            && !self.battle_pan() && !crate::text_speed::shown(bus)
+            && crate::pub_touch::notice(bus).is_none() && !crate::pub_touch::continue_arrow(bus)
+            && battle::MenuScene::read(bus).is_none()
+    }
+    /// Frames to emulate for `count` shown: more while a finger holds the
+    /// battle on, until there is something to choose.
+    pub(crate) fn turbo_frames(&mut self, count: usize) -> usize {
+        let Some(Gesture::Turbo { since, .. }) = self.gesture else { return count };
+        if self.machine.bus.frames < since + crate::text_speed::HOLD { return count; }
+        if !self.battle_runs() { return count; }
+        count.max(TURBO)
     }
     /// Each emulated frame: a finger held on dialogue hurries it.
     pub(crate) fn drive_dialogue_gesture(&mut self) {

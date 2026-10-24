@@ -126,6 +126,62 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.58-android-preview
+
+**Battles from deployment to the results, by touch** (the 0.57 audit).
+- Choosing units (`deploy_touch.rs`): the roster (the "START: To Battle!"
+  hint, tile 0x314; the game's arrows, tile 0x2e0, at x 6 and 218) shows
+  Place (A) and Battle (START, then "Begin battle?") at the bottom, Info (R)
+  and Return (B) at the top; the arrows offer the next or previous unit, the
+  ring sends the one offered. Dispatch (the "Dispatch MODE" label, tiles
+  0x300/0x308) takes a blue cell, then the facing. No blind A there: a
+  stray tap never sends a unit. Before, START was unreachable: no battle
+  could begin by touch.
+- What a tap on the field means depends on what is chosen
+  (`Scene::pick`): moving, a free blue cell under the finger, also behind
+  a unit or a tree drawn in front of it; a target, a unit in range drawn
+  under the finger, then a green cell; the free cursor, a unit, then the
+  cell.
+- Drag the field to pan (`Gesture::Pan`): the game's camera scroll
+  (EWRAM 0x02007f64/66, subtracted in its projection) follows the finger;
+  the game clamps it to the map (measured: X -144..0, Y 272..320 on Herb
+  Picking) and keeps it. Only while the player chooses (a cell, a command,
+  the facing, units to send). Taps map through the same projection, so they
+  stay exact. Before, two thirds of the map were beyond the right edge.
+- The law in force over the battle (laws.rs, under the Return row), a tap
+  opens the whole list as on the map. The map's location menus no longer
+  hide the laws.
+- Hold a finger on a battle playing by itself (enemy turns, actions):
+  4 frames a frame while held (`Gesture::Turbo`), until something is to be
+  chosen. Measured: an enemy phase in 200 frames instead of 400.
+- Notices that ask nothing ("Be sure to press SELECT...", no ring on a
+  Yes/No line) show OK, and a tap anywhere moves on.
+- Facing: a "Keep facing" button ends the turn facing as it is (the step is
+  otherwise easy to miss).
+- Return in the free cursor (after inspecting a unit) goes back to the unit
+  whose turn it is, its command menu open (`free_home`), instead of nothing.
+- Menu rows: a row's tap band is centred on its text (4 rows over the row):
+  a tap on the top of "Move" chose nothing before.
+- MISSION CLEARED! once: a battle with its text planes up has the town
+  scenes' layers (BG 4c03 4e02 0b08 0a08), so it was taken for a shop and
+  the banner's outline plane was docked under the field. A battle's field
+  cursor exists (`battle_cursor`: the descriptor's object pointer, 0 in
+  towns), so it is not a town scene.
+- The results on the map ("[Herb Picking] went well", the reward) move on
+  with a tap: the map's cursor waits then. Its portrait (8-bpp, tile 0x126)
+  was taken for a menu pointer; pointers are 4-bpp.
+- The audit's black screen after victory was the test's own doing: it set
+  the Judge's HP (the last unit of the enemy table) to 1, and the game then
+  asked for a Judge animation the ROM does not have (sprite set 0x66,
+  animation 0xc: no frames), which left -1 in a task's pointer that the
+  battle's teardown freed. A real victory plays through: MISSION CLEARED!,
+  the closing dialogue, the results, the next location symbol.
+Measured, touch only, from the save: Giza Plains, the opening dialogue (held
+to hurry), units chosen and placed, Battle, Yes; turns of Move, Fight, a
+target, Do it, the facing; panning; the laws in battle; Wait and Keep
+facing; inspecting an enemy and Return; the victory to the results and the
+location symbol.
+
 ## 0.57-android-preview
 
 **Hold to hurry dialogue.** A finger held (15 frames, a quarter second) where

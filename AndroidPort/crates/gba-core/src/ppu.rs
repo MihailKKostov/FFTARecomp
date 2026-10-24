@@ -119,6 +119,10 @@ pub fn ffta_zoom_rows_ready(mem: &MemMap) -> bool {
 pub fn docked_town_scene(mem: &MemMap) -> bool {
     mem.ffta_dialogue.docked && mem.ffta_dialogue.separate && io16(mem, 0) & 0x0f07 == 0x0f00
         && [8, 10, 12, 14].map(|o| io16(mem, o)) == [0x4c03, 0x4e02, 0x0b08, 0x0a08]
+        // A battle with its text planes up (story text, MISSION CLEARED!) has
+        // the same layers; its field cursor exists there (measured: owner
+        // pointer 0x0201d9b0 at the victory, 0 in the pub and the shop).
+        && !crate::ffta_battle_mouse::battle_cursor(mem)
 }
 /// BGs drawn in the rows beyond the native screen. A docked town scene's menu
 /// planes hold only parked tiles there (stat digits under the quantity prompt).

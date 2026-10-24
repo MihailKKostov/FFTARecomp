@@ -13,6 +13,8 @@ const PARTY_COLUMN:usize=0xfd29;
 const PARTY_INDEX:usize=0xfd3e;
 /// The Return button on a unit's status screen: leaves the Party screens
 /// (B to the roster, then B again).
+/// Return in the battle's free cursor (`free_return`).
+pub(crate) const FREE_HOME: u16 = 5;
 pub(crate) const PARTY_CLOSE:u16=1;
 /// Frames the roster is shown settled before its hint bar keys are taken
 /// (measured: Start ignored 30 frames after B from a status screen, taken at 45).
@@ -61,7 +63,9 @@ pub(crate) fn party_cursor(bus:&gba_core::mem::MemMap)->Option<(i32,i32)>{
     bus.oam.chunks_exact(8).filter(|o|{
         let (a0,a2)=(half(o,0),half(o,4));
         let arrow=a0&0xff00==0x8000 && a2==0x2122;
-        !arrow && a0&0x300!=0x200 && (0x120..=0x127).contains(&(a2&1023)) && (a2>>10)&3==0 && (a0&255)<160
+        // 4-bpp: a portrait's 8-bpp tiles can share the numbers (measured: the
+        // results' portrait, 32x64 at 0,0, tile 0x126).
+        !arrow && a0&0x300!=0x200 && a0&0x2000==0 && (0x120..=0x127).contains(&(a2&1023)) && (a2>>10)&3==0 && (a0&255)<160
     }).map(|o|((half(o,2)&511) as i32,(half(o,0)&255) as i32)).last()
 }
 
@@ -120,6 +124,8 @@ pub struct Engine {
     /// The finger the engine follows (gestures.rs), the app's touch slop (px),
     /// and the quantity arrow last stepped (until the frame).
     pub(crate) gesture: Option<crate::gestures::Gesture>,
+    /// The cell the battle's free cursor started on (the unit whose turn it is).
+    pub(crate) free_home: Option<(u8,u8)>,
     /// Touch-only shop lists that scroll and swipe (shop_scroll.rs).
     pub(crate) shop_scroll: crate::shop_scroll::ShopScroll,
     pub(crate) gesture_slop: f32,
@@ -230,12 +236,37 @@ impl Engine {
         self.touch_enabled && bus.ffta_dialogue.docked && !self.padded && crate::game_buttons::available(&bus.rom)
             && gba_core::ppu::docked_town_scene(bus)
     }
+    /// The battle's free cursor (Return from the command menu): the field's
+    /// cursor with nothing to choose among (no move or target cells).
+    pub(crate) fn free_cursor(&self)->bool{
+        let bus=&self.machine.bus;
+        !crate::deploy_touch::shown(bus) && battle::Scene::read(bus).is_some_and(|s|s.cells.iter().all(|c|c.range==0))
+    }
+    /// Remembers where the free cursor starts (on the unit whose turn it is);
+    /// forgets it once a turn goes on (moving, a target, the facing).
+    fn track_free_home(&mut self){
+        let bus=&self.machine.bus;
+        if battle::facing_center(bus).is_some() || battle::Scene::read(bus).is_some_and(|s|s.cells.iter().any(|c|c.range>0)) {self.free_home=None;return;}
+        if self.free_home.is_none() && self.free_cursor() {self.free_home=battle::Scene::read(bus).map(|s|s.selected);}
+    }
+    /// Return in the free cursor: back to the unit whose turn it is, its command menu open.
+    pub(crate) fn free_return(&mut self){
+        self.mouse.cancel();
+        match self.free_home {
+            Some((x,y)) => {battle::select(&mut self.machine.bus,x,y,true);}
+            None => {battle::press(&mut self.machine.bus,0x3fd);}
+        }
+    }
     fn scene_buttons(&self)->Vec<crate::game_buttons::Button>{
         use crate::game_buttons::row;
         let bus=&self.machine.bus;
         if !self.touch_enabled || !bus.ffta_dialogue.docked || self.padded || !crate::game_buttons::available(&bus.rom) {return Vec::new();}
         let (start,back)=(0x3f7,0x3fd);
-        if crate::pub_touch::notice(bus).is_some() {return row(&bus.rom,236,&[("Yes",crate::pub_touch::YES,false),("No",back,false)]);}
+        if let Some(at)=crate::pub_touch::notice(bus) {
+            return if crate::pub_touch::notice_asks(bus,at) {row(&bus.rom,236,&[("Yes",crate::pub_touch::YES,false),("No",back,false)])}
+                else {row(&bus.rom,236,&[("OK",0x3fe,false)])};
+        }
+        if let Some(buttons)=self.deploy_buttons() {return buttons;}
         if bus.world_hud.map_frame {
             let open=bus.world_hud.menu;
             let w=crate::game_buttons::width(&bus.rom,"Menu");
@@ -267,7 +298,12 @@ impl Engine {
         // top: the bottom holds the unit's panel and the command menu.
         if battle::Scene::read(bus).is_some() || battle::facing_center(bus).is_some()
             || (bus.ffta_dialogue.action_layout && battle::MenuScene::read(bus).is_some()) {
-            return row(&bus.rom,236,&[("Return",back,false)]).into_iter().map(|b|crate::game_buttons::Button{top:true,..b}).collect();
+            let back=if self.free_cursor() {FREE_HOME} else {back};
+            let mut buttons:Vec<_>=row(&bus.rom,236,&[("Return",back,false)]).into_iter().map(|b|crate::game_buttons::Button{top:true,..b}).collect();
+            // Facing: a tap toward a side turns the unit there and ends its
+            // turn; the button ends it facing as it is (and says what is asked).
+            if battle::facing_center(bus).is_some() {buttons.extend(row(&bus.rom,236,&[("Keep facing",0x3fe,false)]));}
+            return buttons;
         }
         Vec::new()
     }
@@ -487,7 +523,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,laws:Default::default(),rumor_close:None,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,laws:Default::default(),rumor_close:None,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,free_home:None,shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -566,6 +602,7 @@ impl Engine {
         // The shop's Info button (scene_buttons) stands in for the game's "R Info" hint.
         self.machine.bus.ffta_dialogue.hide_info_hint=self.touch_enabled && crate::game_buttons::available(&self.machine.bus.rom);
         self.audio.clear();
+        let count=self.turbo_frames(count);
         self.pcm.begin(count.clamp(1,8),mode,
             self.cache_dir.as_deref().unwrap_or(&std::env::temp_dir()))?;
         let count=count.clamp(1,8);
@@ -574,6 +611,7 @@ impl Engine {
         self.laws_tick()?;
         self.drive_party_flow();
         self.drive_pub();
+        self.track_free_home();
         for index in 0..count {
             self.drive_party_goal();
             self.drive_dialogue_gesture();

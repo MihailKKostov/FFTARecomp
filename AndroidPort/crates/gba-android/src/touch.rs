@@ -254,7 +254,8 @@ impl Engine {
         // shown with no docked menu panel) is not in the docked panels: a tap
         // off them goes to the field. Not with a docked menu, which the field
         // would find again where the game draws it.
-        let ui=(battle::MenuScene::read(&self.machine.bus).is_some()||state.shop_layout)&&index.is_some();
+        let ui=(battle::MenuScene::read(&self.machine.bus).is_some()||state.shop_layout)&&index.is_some()
+            &&!crate::deploy_touch::shown(&self.machine.bus);
         let town=state.town_layout||state.shop_layout;
         let docked=if ui {pieces(&self.machine.bus,band,index.unwrap(),self.town_menu).iter().find_map(|l|l.source(px,py))}else{None};
         if let Some(source)=docked{
@@ -295,6 +296,7 @@ impl Engine {
                 None=>ny,
             };
             if self.touch_enabled && self.machine.bus.ffta_dialogue.docked && self.notice_tap(nx,ny) {return;}
+            if self.touch_enabled && self.deploy_tap(nx,ny) {return;}
             if let Some(keys)=self.usa.then(||crate::title_touch::keys(&self.machine.bus,nx,ny).or_else(||crate::title_touch::slot_keys(&self.machine.bus,nx,ny))).flatten(){
                 self.mouse.cancel();
                 if !keys.is_empty(){battle::press_sequence(&mut self.machine.bus,&keys);}
@@ -322,13 +324,16 @@ impl Engine {
     pub(crate) fn blind_confirm(&self)->bool{
         let bus=&self.machine.bus;
         if !(self.touch_enabled && bus.ffta_dialogue.docked) {return true;}
+        if crate::deploy_touch::shown(bus) {return false;}
         if let Some(phase)=gba_core::ffta_shop_mouse::phase(bus).filter(|_|self.town_buttons()) {
             return phase==gba_core::ffta_shop_mouse::ShopPhase::Message;
         }
         let menu=self.menu_layout.is_some() || crate::engine::party_cursor(bus).is_some()
             || battle::MenuScene::read(bus).is_some() || gba_core::ffta_graph_menu::GraphMenu::read(bus).is_some();
         if menu {return false;}
-        if bus.world_hud.map_frame {return bus.world_hud.menu;}
+        // The map: not where its cursor chooses a place; a message waiting
+        // over it (the results after a mission) moves on with a tap.
+        if bus.world_hud.map_frame {return bus.world_hud.menu || !battle::world_cursor_active(bus);}
         true
     }
     /// A game-style button's key. B only closes the shop's item Info window:
@@ -337,6 +342,7 @@ impl Engine {
         if key==crate::engine::PARTY_CLOSE {self.leave_party();}
         else if key==crate::pub_touch::CLOSE_RUMOR {self.close_rumor();}
         else if key==crate::pub_touch::YES {self.notice_yes();}
+        else if key==crate::engine::FREE_HOME {self.free_return();}
         else if key==0x3fd && gba_core::ppu::shop_info_open(&self.machine.bus) {battle::press_sequence(&mut self.machine.bus,&[0x2ff,0x3fd]);}
         else {battle::press(&mut self.machine.bus,key);}
     }

@@ -88,6 +88,8 @@ impl MenuProfile {
             .then_some(p)
     }
 }
+/// Rows a menu row's tap band starts above the row (`MenuScene::hit`).
+const ROW_LIFT: i32 = 4;
 impl MenuScene {
     fn cursor_offsets<'a>(mem:&'a MemMap,callback:u32,start:usize,end:usize,
         known:Option<&'a[usize]>)->impl Iterator<Item=usize>+'a {
@@ -453,10 +455,14 @@ impl MenuScene {
     pub fn hit(&self, x: f32, y: f32) -> Option<u8> {
         let left=if self.binary || self.polling {self.origin[0]}else{self.origin[0]+8};
         let right=self.right;
+        // A row's text takes its top 12 rows (measured on the battle commands:
+        // "Move" on native rows 84-90 of the row from 84): its band is centred
+        // on the text, 4 rows over the row.
+        let top=self.origin[1]-if self.horizontal {0} else {ROW_LIFT};
         if !x.is_finite() || !y.is_finite() || x < left as f32 || x >= right as f32
-            || y < self.origin[1] as f32 || y >= (self.origin[1]+if self.horizontal {16}else{self.count as i32*16}) as f32 { return None; }
+            || y < top as f32 || y >= (top+if self.horizontal {16}else{self.count as i32*16}) as f32 { return None; }
         if self.horizontal {return Some(u8::from(x>=self.split as f32));}
-        Some(((y-self.origin[1] as f32)/16.) as u8)
+        Some(((y-top as f32)/16.) as u8)
     }
     /// Shared window-list component, observed in the world-map town menu.
     /// Only visible, unscrolled instances with verified callback/layout qualify.
@@ -593,6 +599,20 @@ impl State {
                 })))
     }
 }
+/// The battle's field cursor exists (its descriptor's object pointer is set):
+/// a battle is loaded, whatever is shown over it.
+pub fn battle_cursor(mem: &MemMap) -> bool {
+    let Some(p) = mem.ffta_battle_mouse.profile else { return false };
+    w(&mem.ewram, p.base).is_some_and(|owner| offset(owner, 0x30).is_some())
+}
+/// The battlefield is shown (its terrain layers as the cursor scenes show
+/// them; story text over it is not the field).
+pub fn field_shown(mem: &MemMap) -> bool {
+    let (Some(display), Some(b0), Some(b1), Some(b2), Some(b3)) = (h(&mem.io, 0), h(&mem.io, 8), h(&mem.io, 10), h(&mem.io, 12), h(&mem.io, 14)) else { return false };
+    if display & 0xc00 == 0xc00 && b2 == 0x0b08 && b3 == 0x0a08 { return false; }
+    display & 0x1007 == 0x1000
+        && ((display & 0xc00 == 0xc00 && b2 == 0x4c03 && b3 == 0x4e02) || (display & 0x300 == 0x300 && b0 == 0x4c03 && b1 == 0x4e02))
+}
 impl Scene {
     pub fn read(mem: &MemMap) -> Option<Self> {
         let state = &mem.ffta_battle_mouse;
@@ -687,6 +707,37 @@ impl Scene {
             .filter_map(|u| self.cells.iter().find(|c| (c.center[0] - u.feet[0]).abs() < 4. && (c.center[1] - u.feet[1]).abs() < 4.))
             .max_by_key(|c| (c.x as u16 + c.y as u16, c.height))
             .copied()
+    }
+    /// The cell a tap at native (x, y) means, by what is being chosen. Things
+    /// nearer the viewer (units, tall terrain) are drawn over the cells behind
+    /// them, so the frontmost cell is not always the one meant:
+    /// - Moving (range 1, the blue cells): a free blue cell under the finger,
+    ///   also behind a unit or a tree (units are never a destination).
+    /// - A target (range 2, the green cells): a unit in range drawn under the
+    ///   finger, then a cell in range under it.
+    /// - Otherwise (the free cursor): a unit drawn there, then the cell.
+    pub fn pick(&self, mem: &MemMap, x: f32, y: f32) -> Option<Cell> {
+        if !x.is_finite() || !y.is_finite() { return None; }
+        let front = |cells: &mut dyn Iterator<Item = Cell>| cells.max_by_key(|c| (c.x as u16 + c.y as u16, c.height));
+        let feet: Vec<[f32; 2]> = units(mem).iter().map(|u| u.feet).collect();
+        let at_feet = |c: &Cell| feet.iter().any(|f| (c.center[0] - f[0]).abs() < 4. && (c.center[1] - f[1]).abs() < 4.);
+        let under = || self.cells.iter().filter(|c| (x - c.center[0]).abs() / 16. + (y - c.center[1]).abs() / 8. < 1.).copied();
+        let drawn: Vec<Cell> = units(mem).into_iter().filter(|u| u.drawn_at(mem, x, y))
+            .filter_map(|u| self.cells.iter().find(|c| (c.center[0] - u.feet[0]).abs() < 4. && (c.center[1] - u.feet[1]).abs() < 4.).copied())
+            .collect();
+        if self.cells.iter().any(|c| c.range == 1) {
+            return front(&mut under().filter(|c| c.range > 0 && !at_feet(c)))
+                .or_else(|| front(&mut under().filter(|c| c.range > 0)))
+                .or_else(|| front(&mut drawn.iter().copied()))
+                .or_else(|| front(&mut under()));
+        }
+        if self.cells.iter().any(|c| c.range > 0) {
+            return front(&mut drawn.iter().copied().filter(|c| c.range > 0))
+                .or_else(|| front(&mut under().filter(|c| c.range > 0)))
+                .or_else(|| front(&mut drawn.iter().copied()))
+                .or_else(|| front(&mut under()));
+        }
+        front(&mut drawn.iter().copied()).or_else(|| front(&mut under()))
     }
 }
 /// A unit's sprite on the field: its pieces (OAM slots) and its feet, 8
@@ -842,7 +893,7 @@ pub fn aim(mem: &mut MemMap, x: f32, y: f32, confirm: bool) -> bool {
         return if let Some(index) = scene.hit(x,y) { menu_select(mem,index,confirm) }
         else { mem.ffta_battle_mouse.cancel(); false };
     }
-    let cell = Scene::read(mem).and_then(|s| s.unit_hit(mem, x, y).or_else(|| s.hit(x, y)));
+    let cell = Scene::read(mem).and_then(|s| s.pick(mem, x, y));
     let Some(c) = cell else {
         mem.ffta_battle_mouse.cancel();
         return false;
@@ -858,6 +909,8 @@ fn world_profile(rom:&[u8],version:Version)->Option<Profile> {
         || rom.get(x..x+2)!=Some(&[0xe0,0x80]) || rom.get(y..y+2)!=Some(&[0x20,0x81]) {return None;}
     Some(Profile{base:0,start:0x08000000+start as u32,commit:0x08000000+x as u32,end:0x08000000+y as u32+8})
 }
+/// The world map's cursor takes input (else the map waits on a message).
+pub fn world_cursor_active(mem:&MemMap)->bool {world_cursor(mem).is_some()}
 /// World-map cursor: the original object owns world X/Y and vertical scroll.
 /// Its screen sprite is a derived result, not the navigation state.
 fn world_cursor(mem:&MemMap)->Option<(usize,[u16;2],u16)> {
@@ -1869,6 +1922,25 @@ mod tests {
         assert_eq!(scene.unit_hit(&m.bus,100.,45.).map(|c|(c.x,c.y)),Some((2,2)));
         assert!(aim(&mut m.bus,100.,45.,true));
         assert_eq!(m.bus.ffta_battle_mouse.request.map(|r|(r.x,r.y)),Some((2,2)));
+        // Moving: the free blue cell under the finger, behind the unit, wins.
+        let range=|m:&mut Machine,cells:&[((usize,usize),u8)]| {
+            m.bus.ewram[0x8168]=1;m.bus.ewram[0x8169]=3;m.bus.ewram[0x8190..0x8390].fill(0);
+            for &((x,y),r) in cells { m.bus.ewram[0x8190+y*16+x]=r<<6; }
+        };
+        range(&mut m,&[((1,1),1),((2,2),1)]);
+        let scene=Scene::read(&m.bus).unwrap();
+        assert_eq!(scene.pick(&m.bus,100.,45.).map(|c|(c.x,c.y)),Some((1,1)));
+        // A target: the unit in range, though a cell in range is under the finger.
+        range(&mut m,&[((1,1),2),((2,2),2)]);
+        let scene=Scene::read(&m.bus).unwrap();
+        assert_eq!(scene.pick(&m.bus,100.,45.).map(|c|(c.x,c.y)),Some((2,2)));
+        // The unit out of range: the cell in range under the finger.
+        range(&mut m,&[((1,1),2)]);
+        let scene=Scene::read(&m.bus).unwrap();
+        assert_eq!(scene.pick(&m.bus,100.,45.).map(|c|(c.x,c.y)),Some((1,1)));
+        range(&mut m,&[]);
+        let scene=Scene::read(&m.bus).unwrap();
+        assert_eq!(scene.pick(&m.bus,100.,45.).map(|c|(c.x,c.y)),Some((2,2)));
         // Off its drawn pixels, or a menu's sprite (priority 0): the cell.
         assert!(scene.unit_hit(&m.bus,120.,45.).is_none());
         for i in 0..2 {m.bus.oam[i*8+5]&=!0x0c;}

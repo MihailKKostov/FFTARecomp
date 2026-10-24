@@ -69,6 +69,11 @@ pub fn notice(bus: &MemMap) -> Option<(i32, i32)> {
 fn ring_on_no(bus: &MemMap, (x, y): (i32, i32)) -> bool {
     sprites(bus).any(|(sx, sy, a0, a2)| sy == y && sx > x + 20 && sx < x + 80 && a0 >> 14 == 0 && (0x120..=0x127).contains(&(a2 & 0x3ff)))
 }
+/// The notice asks Yes or No: the game's ring is shown on its line (an
+/// information notice, "Be sure to press SELECT...", has none and waits for A).
+pub fn notice_asks(bus: &MemMap, (x, y): (i32, i32)) -> bool {
+    sprites(bus).any(|(sx, sy, a0, a2)| sy == y && sx >= x - 4 && sx < x + 80 && a0 >> 14 == 0 && (0x120..=0x127).contains(&(a2 & 0x3ff)))
+}
 /// Notice buttons: Yes chooses Yes wherever the ring is.
 pub(crate) const YES: u16 = 4;
 
@@ -112,6 +117,8 @@ impl Engine {
     /// the notice does nothing. False when no notice is shown.
     pub(crate) fn notice_tap(&mut self, x: f32, y: f32) -> bool {
         let Some((rx, ry)) = notice(&self.machine.bus) else { return false };
+        // Information only: a tap anywhere moves on.
+        if !notice_asks(&self.machine.bus, (rx, ry)) { self.mouse.cancel(); battle::press(&mut self.machine.bus, A); return true; }
         let row = y >= (ry - 6) as f32 && y < (ry + 14) as f32;
         if row && x >= (rx - 4) as f32 && x < (rx + 36) as f32 { self.notice_yes(); }
         else if row && x >= (rx + 36) as f32 && x < (rx + 80) as f32 { self.mouse.cancel(); battle::press(&mut self.machine.bus, B); }
@@ -182,6 +189,11 @@ mod tests {
         // NOTICE title at tile column 3, row 2: Yes / No three rows under it.
         tiles(&mut m, 0x5000, 3, 2, &[0xb04a, 0xb04b, 0xb04c, 0xb04d]);
         assert_eq!(notice(&m.bus), Some((27, 44)));
+        // It asks only with the ring on its Yes/No line (measured at 27,44, tile 0x127).
+        assert!(!notice_asks(&m.bus, (27, 44)));
+        sprite(&mut m, 3, [0x002c, 0x001b, 0x0127]);
+        assert!(notice_asks(&m.bus, (27, 44)));
+        sprite(&mut m, 3, [0x0200, 0, 0]);
         // RUMORS: six title tiles between the window's edges.
         tiles(&mut m, 0x5800, 2, 2, &[0xc007, 0xc03e, 0xc03f, 0xc040, 0xc041, 0xc042, 0xc043, 0xc008]);
         assert!(rumor_text(&m.bus));

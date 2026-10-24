@@ -48,6 +48,8 @@ const BANNER_TOP: i32 = 4;
 const SHOWN: usize = 3;
 /// Indent of the coming laws, and the columns the game's marked row is indented by.
 const INDENT: usize = 16;
+/// Rows the battle's banner starts lower by: under the top button row.
+const BATTLE_DROP: i32 = 28;
 /// Native rows the shown laws take under the top of the frame (and a gap).
 pub(crate) const BANNER_ROWS: i32 = BANNER_TOP + (HEADER.1 - HEADER.0) as i32 + (SHOWN * ROW) as i32 + 4;
 /// Silent frames run per frame shown; frames for the list to appear; rows
@@ -290,7 +292,12 @@ impl Engine {
     pub(crate) fn laws_tick(&mut self) -> Result<(), String> {
         let bus = &self.machine.bus;
         let wanted = self.touch_enabled && bus.ffta_dialogue.docked && crate::game_buttons::available(&bus.rom);
-        if !wanted || !bus.world_hud.map_frame { self.laws.run = None; self.laws.open = false; return Ok(()); }
+        if !wanted || !bus.world_hud.map_frame {
+            // The battle shows the laws too (laws_present): its list stays open there.
+            self.laws.run = None;
+            if !(wanted && gba_core::ffta_battle_mouse::field_shown(bus)) { self.laws.open = false; }
+            return Ok(());
+        }
         let io = |o: usize| half(&bus.io, o);
         let fading = matches!((io(0x50) >> 6) & 3, 2 | 3) && io(0x54) & 31 != 0;
         if let Some(d) = date(bus).filter(|_| !bus.world_hud.menu && !fading) {
@@ -379,7 +386,12 @@ impl Engine {
         self.laws.banner = None;
         self.laws.follow();
         let bus = &self.machine.bus;
-        if !bus.world_hud.map_frame || bus.world_hud.menu || self.laws.current().is_none() { return; }
+        // In battle: the law in force only, under the top button row, over the sky.
+        let battle = !bus.world_hud.map_frame && gba_core::ffta_battle_mouse::field_shown(bus)
+            && self.touch_enabled && bus.ffta_dialogue.docked;
+        // Also over the map's menus (a place's menu, Menu): the map is drawn
+        // under the banner, so they never reach it.
+        if !(bus.world_hud.map_frame || battle) || self.laws.current().is_none() { return; }
         let Some(table) = self.laws.table.take() else { return };
         let (rw, rh) = (mem::render_width(), mem::render_height() as i32);
         let ex = mem::extra() as i32;
@@ -400,12 +412,12 @@ impl Engine {
             }
         };
         let all = (i32::MIN, i32::MAX);
-        let top = dock.0 + BANNER_TOP;
+        let top = dock.0 + BANNER_TOP + if battle { BATTLE_DROP } else { 0 };
         put(&table.header, top, 0, all, false);
         let first = top + (HEADER.1 - HEADER.0) as i32;
         let n = table.rows.len();
         let row_at = |i: i64| &table.rows[i.rem_euclid(n as i64) as usize];
-        let shown = n.min(SHOWN);
+        let shown = n.min(if battle { 1 } else { SHOWN });
         let mut end = first + (shown * ROW) as i32;
         self.laws.banner = Some((top, end));
         // From the row the laws have scrolled to: whole rows and the part between.
