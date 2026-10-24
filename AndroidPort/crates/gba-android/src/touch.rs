@@ -328,9 +328,10 @@ impl Engine {
         eprintln!("FFTA_TOUCH click x={x:.3} y={y:.3} handled={handled}");
     }
     /// Native coordinates of screen pixels on the game picture.
+    /// Zoomed out, through its scale (battle_zoom.rs).
     pub(crate) fn world_native(&self,px:f32,py:f32)->(f32,f32){
-        ((px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32-mem::extra() as f32,
-            (py-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32-mem::extra_y() as f32)
+        self.texture_native((px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32,
+            (py-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32)
     }
     /// Native coordinates of a point (fractions) on a docked battle window
     /// (a list the game draws, docked at the bottom), as `tap` maps it.
@@ -382,6 +383,7 @@ impl Engine {
         else if key==crate::battle_ui::OPEN_SYSTEM {self.open_system();}
         else if key==crate::battle_ui::CLOSE_SYSTEM {self.close_system();}
         else if key==crate::battle_ui::RECENTER {self.recenter();}
+        else if key==crate::battle_zoom::ZOOM {self.toggle_zoom();}
         else if key==0x3fd && gba_core::ppu::shop_info_open(&self.machine.bus) {battle::press_sequence(&mut self.machine.bus,&[0x2ff,0x3fd]);}
         else {battle::press(&mut self.machine.bus,key);}
     }

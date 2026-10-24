@@ -51,6 +51,9 @@ pub struct State {
     facing_key: Option<u16>,
     world_profile: Option<Profile>,
     world_request: Option<Request>,
+    /// Units are also found by the units' tables (the frame zoomed out:
+    /// units beyond the game's screen are drawn by the port, not in OAM).
+    pub table_units: bool,
 }
 #[derive(Clone, Copy)]
 struct MenuProfile { start: u32, commit: u32, end: u32, cursor: u32 }
@@ -722,9 +725,13 @@ impl Scene {
         let feet: Vec<[f32; 2]> = units(mem).iter().map(|u| u.feet).collect();
         let at_feet = |c: &Cell| feet.iter().any(|f| (c.center[0] - f[0]).abs() < 4. && (c.center[1] - f[1]).abs() < 4.);
         let under = || self.cells.iter().filter(|c| (x - c.center[0]).abs() / 16. + (y - c.center[1]).abs() / 8. < 1.).copied();
-        let drawn: Vec<Cell> = units(mem).into_iter().filter(|u| u.drawn_at(mem, x, y))
+        let mut drawn: Vec<Cell> = units(mem).into_iter().filter(|u| u.drawn_at(mem, x, y))
             .filter_map(|u| self.cells.iter().find(|c| (c.center[0] - u.feet[0]).abs() < 4. && (c.center[1] - u.feet[1]).abs() < 4.).copied())
             .collect();
+        if mem.ffta_battle_mouse.table_units {
+            let stand = standing(mem);
+            drawn.extend(self.cells.iter().filter(|c| stand.contains(&(c.x, c.y)) && body_at(c.center, x, y)).copied());
+        }
         if self.cells.iter().any(|c| c.range == 1) {
             return front(&mut under().filter(|c| c.range > 0 && !at_feet(c)))
                 .or_else(|| front(&mut under().filter(|c| c.range > 0)))
@@ -828,9 +835,56 @@ pub fn facing_lit(mem: &MemMap) -> Option<u16> {
         Some(match (right, below) { (false, false) => 0x3df, (true, false) => 0x3bf, (false, true) => 0x37f, (true, true) => 0x3ef })
     })
 }
-/// A unit is drawn at native (x, y) (also with a menu over the field).
-pub fn unit_drawn_at(mem: &MemMap, x: f32, y: f32) -> bool {
-    x.is_finite() && y.is_finite() && units(mem).iter().any(|u| u.drawn_at(mem, x, y))
+/// The field's cells (x, y, elevation) and their centres on screen
+/// (native), in any mode (as `Scene::read` places them).
+fn field_cells(mem: &MemMap) -> Option<Vec<(u8, u8, u8, [f32; 2])>> {
+    let (width, height) = (*mem.ewram.get(0x7f18)? as usize, *mem.ewram.get(0x7f19)? as usize);
+    if width == 0 || height == 0 || width > 16 || height > 16 { return None; }
+    let table = offset(w(&mem.ewram, 0x7f14)?, width * height * 2)?;
+    let ox = h(&mem.ewram, 0x7f60)? as i16 as i32 - h(&mem.ewram, 0x7f64)? as i16 as i32;
+    let oy = h(&mem.ewram, 0x7f62)? as i16 as i32 - h(&mem.ewram, 0x7f66)? as i16 as i32;
+    let mut cells = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let elevation = mem.ewram[table + 2 * (y * width + x)];
+            if elevation == 0 { continue; }
+            let center = [(16 * (x as i32 - y as i32) + ox) as f32, (8 * (x as i32 + y as i32 + 1 - elevation as i32) + oy) as f32];
+            cells.push((x as u8, y as u8, elevation, center));
+        }
+    }
+    Some(cells)
+}
+/// The field's cells' centres, their bounds (left, top, right, bottom).
+pub fn field_bounds(mem: &MemMap) -> Option<[f32; 4]> {
+    field_cells(mem)?.iter().map(|c| c.3).fold(None, |b: Option<[f32; 4]>, [cx, cy]| {
+        Some(b.map_or([cx, cy, cx, cy], |b| [b[0].min(cx), b[1].min(cy), b[2].max(cx), b[3].max(cy)]))
+    })
+}
+/// The cells units stand on, by the units' tables (USA, measured on Herb
+/// Picking: the clan's at EWRAM 0x98, the others' at 0x2fdc, 0x108 apart;
+/// HP at +0, the cell at +0xde; a clan unit not sent has 0 at +0xe3).
+fn standing(mem: &MemMap) -> Vec<(u8, u8)> {
+    [(0x98, true), (0x2fdc, false)].into_iter().flat_map(|(base, clan)| (0..8).filter_map(move |i| {
+        let u = mem.ewram.get(base + i * 0x108..base + i * 0x108 + 0xe4)?;
+        (h(u, 0).unwrap_or(0) > 0 && (!clan || u[0xe3] != 0)).then_some((u[0xde], u[0xdf]))
+    })).collect()
+}
+/// Native (x, y) is on a unit standing on a cell centred at `center`: its
+/// cell, or the body drawn over it (about 20 wide, 34 tall over its feet).
+fn body_at(center: [f32; 2], x: f32, y: f32) -> bool {
+    (x - center[0]).abs() <= 10. && (center[1] - 34. ..=center[1] + 6.).contains(&y)
+}
+/// The cell of the unit drawn at native (x, y), in any mode (the frontmost):
+/// by its sprite, and with `table_units` (zoomed out: units beyond the
+/// game's screen are drawn by the port, not in OAM) by the units' tables.
+pub fn unit_cell_at(mem: &MemMap, x: f32, y: f32) -> Option<(u8, u8)> {
+    if !x.is_finite() || !y.is_finite() { return None; }
+    let cells = field_cells(mem)?;
+    let feet: Vec<[f32; 2]> = units(mem).into_iter().filter(|u| u.drawn_at(mem, x, y)).map(|u| u.feet).collect();
+    let stand = if mem.ffta_battle_mouse.table_units { standing(mem) } else { Vec::new() };
+    cells.iter().filter(|c| feet.iter().any(|f| (c.3[0] - f[0]).abs() < 4. && (c.3[1] - f[1]).abs() < 4.)
+            || (stand.contains(&(c.0, c.1)) && body_at(c.3, x, y)))
+        .max_by_key(|c| (c.0 as u16 + c.1 as u16, c.2)).map(|c| (c.0, c.1))
 }
 /// Exact packed-quarter style query from USA0801D58C / EUR0801E6FC.
 pub fn range_value(mem: &MemMap, x: u8, y: u8) -> u8 {

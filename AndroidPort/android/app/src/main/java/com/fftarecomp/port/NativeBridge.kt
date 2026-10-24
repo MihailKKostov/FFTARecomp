@@ -69,6 +69,9 @@ object NativeBridge {
     external fun gbaPointerDown(x:Float,y:Float,slop:Float):Boolean
     external fun gbaPointerMove(x:Float,y:Float)
     external fun gbaPointerUp(x:Float,y:Float,cancel:Boolean)
+    /** Two fingers spreading to [ratio] of their first distance zoom a battle: true when taken. */
+    external fun gbaPinch(ratio:Float,start:Boolean):Boolean
+    external fun gbaPinchEnd()
     external fun gbaUiProfile(enabled:Boolean,reference:Boolean)
     external fun gbaReferenceFrame(reference:Boolean)
     external fun gbaReferenceDialogue(reference:Boolean)

@@ -129,8 +129,8 @@ pub struct Engine {
     /// System was opened from the unit's commands (battle_ui.rs): closing it goes back there.
     pub(crate) system_return: bool,
     pub(crate) free_return_after: Option<u64>,
-    /// A unit tapped from the command menu: native point, deadline (battle_ui.rs).
-    pub(crate) inspect: Option<(f32,f32,u64)>,
+    /// A unit tapped from the command menu: its cell, deadline (battle_ui.rs).
+    pub(crate) inspect: Option<((u8,u8),u64)>,
     /// A unit looked at tapped again: its Status chosen, until this frame.
     pub(crate) inspect_status: Option<u64>,
     /// The camera before the player panned it, and what was being chosen then.
@@ -140,6 +140,7 @@ pub struct Engine {
     pub(crate) facing: crate::facing_touch::Facing,
     pub(crate) turbo_hint: crate::gestures::TurboHint,
     pub(crate) order: crate::turn_order::Order,
+    pub(crate) zoom: crate::battle_zoom::Zoom,
     pub(crate) flat: crate::battle_windows::Flat,
     /// Touch-only shop lists that scroll and swipe (shop_scroll.rs).
     pub(crate) shop_scroll: crate::shop_scroll::ShopScroll,
@@ -531,7 +532,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,laws:Default::default(),rumor_close:None,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,free_home:None,system_return:false,free_return_after:None,inspect:None,inspect_status:None,pan_home:None,glide:None,facing:Default::default(),turbo_hint:Default::default(),order:Default::default(),flat:Default::default(),shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,laws:Default::default(),rumor_close:None,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,free_home:None,system_return:false,free_return_after:None,inspect:None,inspect_status:None,pan_home:None,glide:None,facing:Default::default(),turbo_hint:Default::default(),order:Default::default(),zoom:Default::default(),flat:Default::default(),shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -623,6 +624,10 @@ impl Engine {
         self.drive_pub();
         self.track_free_home();
         self.drive_battle_ui();
+        // Zoomed out: the frame drawn with wider margins (battle_zoom.rs).
+        let wide=self.zoom_frame(extra_x,extra_y);
+        self.machine.bus.ffta_battle_mouse.table_units=self.zoom.shown<1.;
+        if let Some((zx,zy,_))=wide {mem::set_extra(zx);mem::set_extra_y(zy);}
         for index in 0..count {
             self.drive_party_goal();
             self.drive_dialogue_gesture();
@@ -636,6 +641,9 @@ impl Engine {
             m.bus.audio_buf.clear();
         }
         self.pcm.finish(&mut self.audio)?;
+        let zoomed=wide.map(|(zx,zy,z)|(240+2*zx,160+2*zy,z));
+        mem::set_extra(extra_x);
+        mem::set_extra_y(extra_y);
         let size = mem::render_width() * mem::render_height();
         self.pixels.resize(size, 0);
         let expanded_rows=mem::extra_y()>0 && (self.machine.bus.ffta_movement.enabled || self.machine.bus.ffta_stage.enabled)
@@ -652,8 +660,17 @@ impl Engine {
         } else { &self.machine.bus.wide_framebuffer[..if padded{mem::render_width()*160}else{size}] };
         let offset=if padded{mem::extra_y()*mem::render_width()}else{0};
         let colors=rgba_colors();
-        for (out,&pixel) in self.pixels[offset..].iter_mut().zip(source){
-            *out=colors[(pixel&0x7fff) as usize];
+        self.zoom.shown=1.;
+        match zoomed {
+            Some((w,h,z)) if !padded => {
+                let source=std::mem::take(&mut self.machine.bus.wide_framebuffer);
+                self.zoom_resample(&source[..w*h],w,h,z);
+                self.machine.bus.wide_framebuffer=source;
+                self.zoom.shown=z;
+            }
+            _ => for (out,&pixel) in self.pixels[offset..].iter_mut().zip(source){
+                *out=colors[(pixel&0x7fff) as usize];
+            }
         }
         if padded { backdrop_grid(&mut self.pixels); }
         // world_rect still carries the shift of the frame it was set for.

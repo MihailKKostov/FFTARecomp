@@ -78,7 +78,7 @@ pub(crate) fn set_camera(bus: &mut MemMap, (x, y): (i16, i16)) {
 }
 /// What the player is choosing (a list, a cell): the game places the camera
 /// anew when it changes.
-fn choosing(bus: &MemMap) -> Option<u32> {
+pub(crate) fn choosing(bus: &MemMap) -> Option<u32> {
     if let Some(m) = battle::MenuScene::read(bus) { return Some(0x1_0000 | (title_hash(bus, m.origin).unwrap_or(0) as u32 & 0xff00) | m.count as u32); }
     battle::Scene::read(bus).map(|s| 0x2_0000 | (s.cells.iter().any(|c| c.range > 0) as u32) << 8 | s.selected.0 as u32 * 16 + s.selected.1 as u32)
 }
@@ -144,12 +144,13 @@ impl Engine {
     pub(crate) fn note_pan(&mut self, from: (i16, i16)) {
         if self.pan_home.is_none() { self.pan_home = choosing(&self.machine.bus).map(|k| (from, k)); }
     }
-    /// Panned away from where the game put the camera.
+    /// Panned away from where the game put the camera (zoomed out, Zoom in
+    /// brings it back).
     fn panned(&self) -> bool {
-        self.pan_home.is_some_and(|(home, _)| { let c = camera(&self.machine.bus); (c.0 - home.0).abs() + (c.1 - home.1).abs() > 8 })
+        !self.zoomed_out() && self.pan_home.is_some_and(|(home, _)| { let c = camera(&self.machine.bus); (c.0 - home.0).abs() + (c.1 - home.1).abs() > 8 })
     }
     /// Center: the camera glides back to where the game had it.
-    pub(crate) fn recenter(&mut self) { self.glide = self.pan_home.map(|h| h.0); }
+    pub(crate) fn recenter(&mut self) { if let Some(home) = self.pan_home { self.glide = Some(home.0); } }
     /// Once a frame: forgets the camera's home once the game moves on, and
     /// glides the camera toward it (a third of the way a frame).
     fn drive_camera(&mut self) {
@@ -161,9 +162,11 @@ impl Engine {
         let step = |a: i16, b: i16| { let d = b as i32 - a as i32; (a as i32 + if d.abs() <= 2 { d } else { d / 3 + d.signum() }) as i16 };
         let next = (step(c.0, to.0), step(c.1, to.1));
         set_camera(bus, next);
-        if next == to { self.glide = None; self.pan_home = None; }
+        // Back home: nothing to come back to (zoomed out, the home is kept).
+        if next == to { self.glide = None; if self.pan_home.is_some_and(|h| h.0 == to) { self.pan_home = None; } }
     }
     pub(crate) fn drive_battle_ui(&mut self) {
+        self.drive_zoom_camera();
         self.drive_camera();
         if let Some(deadline) = self.inspect_status {
             let bus = &self.machine.bus;
@@ -173,15 +176,14 @@ impl Engine {
                 battle::press(&mut self.machine.bus, A);
             }
         }
-        if let Some((x, y, deadline)) = self.inspect {
+        if let Some((cell, deadline)) = self.inspect {
             let bus = &self.machine.bus;
             if bus.frames > deadline { self.inspect = None; }
             else if self.free_cursor() && battle::idle(bus) {
                 self.inspect = None;
                 // The free cursor starts on the unit whose turn it is: that
                 // one tapped goes straight back to its commands.
-                let cell = battle::Scene::read(bus).and_then(|s| s.pick(bus, x, y).map(|c| (c.x, c.y)));
-                if cell.is_none() || cell == self.free_home { self.free_return(); } else { battle::aim(&mut self.machine.bus, x, y, false); }
+                if Some(cell) == self.free_home { self.free_return(); } else { battle::select(&mut self.machine.bus, cell.0, cell.1, false); }
             }
         }
         if let Some(at) = self.free_return_after {
@@ -195,11 +197,13 @@ impl Engine {
     /// goes to it: its panel shows; Return comes back). True when taken.
     pub(crate) fn inspect_tap(&mut self, x: f32, y: f32) -> bool {
         let bus = &self.machine.bus;
-        if !window(bus).is_some_and(|w| w.0 == Window::Commands) || !battle::unit_drawn_at(bus, x, y) || !battle::idle(bus) { return false; }
+        if !window(bus).is_some_and(|w| w.0 == Window::Commands) || !battle::idle(bus) { return false; }
+        // Its cell: B moves the camera back to the unit whose turn it is.
+        let Some(cell) = battle::unit_cell_at(bus, x, y) else { return false };
         self.mouse.cancel();
         self.free_home = None;
         battle::press(&mut self.machine.bus, B);
-        self.inspect = Some((x, y, self.machine.bus.frames + 90));
+        self.inspect = Some((cell, self.machine.bus.frames + 90));
         true
     }
     /// A tap at native (x, y) in the free cursor: whether it confirms (A).
@@ -214,8 +218,9 @@ impl Engine {
         let scene = battle::Scene::read(bus)?;
         let cell = scene.pick(bus, x, y).map(|c| (c.x, c.y));
         let on = cell == Some(scene.selected);
-        if on && cell != self.free_home && battle::unit_drawn_at(bus, x, y) { self.inspect_status = Some(bus.frames + 60); }
-        Some(on && (cell == self.free_home || battle::unit_drawn_at(bus, x, y)))
+        let unit = battle::unit_cell_at(bus, x, y).is_some();
+        if on && cell != self.free_home && unit { self.inspect_status = Some(bus.frames + 60); }
+        Some(on && (cell == self.free_home || unit))
     }
     /// The mission's pages over a battle (System, Mission): the corner
     /// arrows turn them, as in the pub (pub_touch.rs). True when taken.
@@ -246,12 +251,22 @@ impl Engine {
         }
         // The mission's pages and the law list (System): back to System.
         if battle::battle_cursor(bus) && (crate::pub_touch::mission_pages(bus) || law_list(bus)) { return Some(top(&[("Return", B, false)])); }
+        // Zoom, top left: where the field is chosen on.
+        let zoom = || -> Vec<Button> {
+            if !self.zoomable() { return Vec::new(); }
+            let label = if self.zoomed_out() { "Zoom in" } else { "Zoom out" };
+            top(&[(label, crate::battle_zoom::ZOOM, false)]).into_iter()
+                .map(|b| Button { x: (4, 4 + b.x.1 - b.x.0), ..b }).collect()
+        };
         if let Some((kind, _)) = window(bus) {
+            if kind == Window::Commands {
+                let mut buttons = if self.panned() { top(&[("System", OPEN_SYSTEM, false), ("Center", RECENTER, false)]) } else { top(&[("System", OPEN_SYSTEM, false)]) };
+                buttons.extend(zoom());
+                return Some(buttons);
+            }
             return Some(match kind {
                 // The unit's commands: nothing to go back to (units are
                 // looked at by tapping them); the System window.
-                Window::Commands if self.panned() => top(&[("System", OPEN_SYSTEM, false), ("Center", RECENTER, false)]),
-                Window::Commands => top(&[("System", OPEN_SYSTEM, false)]),
                 Window::System => top(&[("Return", CLOSE_SYSTEM, false)]),
                 _ => top(&[("Return", B, false)]),
             });
@@ -265,6 +280,7 @@ impl Engine {
             // Facing: a tap toward a side turns the unit there and ends its
             // turn; the button ends it facing as it is.
             if facing { buttons.extend(row(rom, 236, &[("Keep facing", A, false)])); }
+            buttons.extend(zoom());
             return Some(buttons);
         }
         // Other windows over the battle (the unit list, Options, Mission).

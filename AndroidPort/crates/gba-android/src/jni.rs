@@ -210,6 +210,17 @@ pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaPointerUp(_: *mu
     if let Ok(mut lock)=ENGINE.lock(){if let Some(engine)=lock.as_mut(){engine.pointer_up(x,y,cancel!=0);}}
 }
 
+/// Two fingers spreading (`ratio` of their first distance; `start` on the
+/// first move) zoom a battle's field: true when taken (battle_zoom.rs).
+#[no_mangle]
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaPinch(_: *mut JNIEnv,_:jobject,ratio:jfloat,start:jboolean)->jboolean{
+    ENGINE.lock().ok().and_then(|mut lock|lock.as_mut().map(|engine|engine.pinch(ratio,start!=0) as jboolean)).unwrap_or(0)
+}
+#[no_mangle]
+pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaPinchEnd(_: *mut JNIEnv,_:jobject){
+    if let Ok(mut lock)=ENGINE.lock(){if let Some(engine)=lock.as_mut(){engine.pinch_end();}}
+}
+
 /// After loading the ROM: continue where the game was left (1), or start from the battery save (0).
 #[no_mangle]
 pub extern "system" fn Java_com_fftarecomp_port_NativeBridge_gbaResume(_: *mut JNIEnv, _: jobject) -> jint {

@@ -17,6 +17,7 @@ mod battle_ui;
 mod battle_windows;
 mod facing_touch;
 mod turn_order;
+mod battle_zoom;
 mod text_speed;
 mod title_touch;
 mod world_map;

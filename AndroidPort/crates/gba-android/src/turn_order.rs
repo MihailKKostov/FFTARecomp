@@ -32,14 +32,19 @@ pub(crate) struct Order {
     key: Option<Vec<u8>>,
     rows: Option<(Image, Vec<u8>)>,
     run: Option<Run>,
+    /// The facing was being chosen last frame.
+    facing: bool,
 }
 
 impl Engine {
     /// Once a frame (after Action's entries are read): reads the turn order
     /// for the unit whose commands are shown.
     pub(crate) fn order_tick(&mut self) -> Result<(), String> {
-        // Read anew each turn: forgotten while the battle runs between turns.
-        if self.battle_runs() || !battle::field_shown(&self.machine.bus) { self.order = Order::default(); }
+        // Read anew each turn: forgotten once its facing is chosen (the turn
+        // over), and away from the field.
+        let facing = battle::facing_center(&self.machine.bus).is_some();
+        if (self.order.facing && !facing) || !battle::field_shown(&self.machine.bus) { self.order = Order::default(); }
+        self.order.facing = facing;
         let bus = &self.machine.bus;
         let wanted = self.touch_enabled && bus.ffta_dialogue.docked && self.usa;
         if !wanted || !window(bus).is_some_and(|w| w.0 == Window::Commands) { self.order.run = None; return Ok(()); }
@@ -99,6 +104,8 @@ impl Engine {
         if !(self.touch_enabled && bus.ffta_dialogue.docked && self.usa) { return; }
         let choosing = window(bus).is_some_and(|w| w.0 == Window::Commands) || battle::Scene::read(bus).is_some() || battle::facing_center(bus).is_some();
         if !choosing || crate::deploy_touch::shown(bus) { return; }
+        // Not while it is read anew (another unit's turn).
+        if self.order.run.is_some() { return; }
         let Some((rows, palette)) = self.order.rows.as_ref() else { return };
         let next: Vec<&Vec<u8>> = rows.entries.iter().skip(1).take(SHOWN).collect();
         if next.is_empty() { return; }

@@ -50,6 +50,9 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
     private var touchingGame=false
     private var dragging=false
     private var twoFinger=false
+    /** Two fingers' first distance, and whether they have pinched (zooming a battle, no B). */
+    private var pinchSpan=0f
+    private var pinching=false
     private var downTime=0L
     private var downX=0f
     private var downY=0f
@@ -59,6 +62,7 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
     // Only complete single-pointer gestures that began on the game can become clicks.
     // Touch-only mode adds two gestures to single taps: a one-finger drag holds the
     // D-pad direction of its offset, and a quick two-finger tap presses B (back).
+    // Two fingers spreading or closing zoom a battle's field instead.
     override fun onTouchEvent(event:MotionEvent):Boolean {
         if(!experimentalClicks || gamePaused || !appActive){endGesture();return false}
         val density=resources.displayMetrics.density
@@ -69,7 +73,8 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                 downX=event.x;downY=event.y;downTime=event.eventTime
                 followed=touchOnly && runCatching{NativeBridge.gbaPointerDown(event.x/width,event.y/height,slop)}.getOrDefault(false)
             }
-            MotionEvent.ACTION_POINTER_DOWN->
+            MotionEvent.ACTION_POINTER_DOWN->{
+                if(event.pointerCount==2){pinchSpan=span(event);pinching=false}
                 if(followed){
                     // A second finger: the engine's gesture ends, and a quick two-finger tap is still B.
                     NativeBridge.gbaPointerUp(event.x/width,event.y/height,true);followed=false
@@ -77,7 +82,14 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                 }
                 else if(touchOnly && touchingGame && !dragging && event.pointerCount==2)twoFinger=true
                 else {touchingGame=false;onDirection(0)}
-            MotionEvent.ACTION_MOVE->if(touchOnly && touchingGame && !twoFinger){
+            }
+            MotionEvent.ACTION_MOVE->if(touchOnly && touchingGame && twoFinger && event.pointerCount>=2 && pinchSpan>0f){
+                val ratio=span(event)/pinchSpan
+                if(pinching || kotlin.math.abs(ratio-1f)>0.12f){
+                    val start=!pinching
+                    if(runCatching{NativeBridge.gbaPinch(ratio,start)}.getOrDefault(false))pinching=true
+                }
+            }else if(touchOnly && touchingGame && !twoFinger){
                 val dx=event.x-downX;val dy=event.y-downY
                 if(followed){
                     // The engine decides: a tap, a drag or a swipe (it gets every move).
@@ -95,6 +107,8 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
                 if(followed){
                     // Lifted: the engine's own tap, fling or swipe end.
                     if(touchingGame)NativeBridge.gbaPointerUp(event.x/width,event.y/height,false)
+                }else if(pinching){
+                    runCatching{NativeBridge.gbaPinchEnd()}
                 }else if(touchingGame && twoFinger){
                     if(event.eventTime-downTime<500 && taps.size<8)taps.offer(ScreenTap(downX/width,downY/height,true))
                 }else if(touchingGame && !dragging && kotlin.math.abs(event.x-downX)<slop &&
@@ -111,8 +125,10 @@ class GameSurface(context: Context, val onError: (String) -> Unit) : GLSurfaceVi
     }
     private fun endGesture(){
         if(dragging && !followed)onDirection(0)
-        touchingGame=false;dragging=false;twoFinger=false;followed=false
+        touchingGame=false;dragging=false;twoFinger=false;followed=false;pinching=false;pinchSpan=0f
     }
+    private fun span(event:MotionEvent):Float=
+        kotlin.math.hypot(event.getX(0)-event.getX(1),event.getY(0)-event.getY(1))
     @Volatile var performance = "Starting..."
     @Volatile private var running = false
     private var worker: Thread? = null

@@ -259,9 +259,17 @@ impl Engine {
                     self.glide = None;
                     self.note_pan(camera);
                     // Screen pixels to native: the field's on-screen scale.
-                    let scale = gba_core::mem::render_width() as f32 / self.world_rect[2].max(1.);
+                    let scale = gba_core::mem::render_width() as f32 / self.world_rect[2].max(1.) / self.zoom.shown;
                     let to = |c: i16, d: f32| (c as f32 - d * scale).round().clamp(-1024., 1024.) as i16;
-                    let (cx, cy) = (to(camera.0, dx), to(camera.1, dy));
+                    let (mut cx, mut cy) = (to(camera.0, dx), to(camera.1, dy));
+                    // Choosing the facing: its unit stays on the game's own
+                    // screen, which leaves out the sprites beyond it (its
+                    // arrows, which tell the facing is asked).
+                    if let Some([fx, fy]) = battle::facing_anchor(&self.machine.bus) {
+                        let now = crate::battle_ui::camera(&self.machine.bus);
+                        cx = cx.clamp(now.0 + (fx - 216.) as i16, now.0 + (fx - 24.) as i16);
+                        cy = cy.clamp(now.1 + (fy - 150.) as i16, now.1 + (fy - 48.) as i16);
+                    }
                     crate::battle_ui::set_camera(&mut self.machine.bus, (cx, cy));
                 }
                 self.gesture = Some(Gesture::Pan { start, camera, moved });
@@ -332,6 +340,8 @@ impl Engine {
             && !self.battle_pan() && !crate::text_speed::shown(bus)
             && crate::pub_touch::notice(bus).is_none() && !crate::pub_touch::continue_arrow(bus)
             && battle::MenuScene::read(bus).is_none()
+            // The preview waits for the player (the card, battle_windows.rs).
+            && self.flat.card.is_none() && !crate::battle_windows::previewing(bus)
     }
     /// Frames to emulate for `count` shown: more while a finger holds the
     /// battle on, until there is something to choose.

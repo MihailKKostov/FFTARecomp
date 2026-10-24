@@ -2553,6 +2553,13 @@ fn render_text_bg_extent(
         }
     }
     render_text_bg_hardware(mem,bg,line,out,ex,rw);
+    // The movement overlay's pair while its scroll is outside the checks of
+    // `ffta_movement_grid` (the cells fading as a unit sets off): wider than
+    // portrait's margins (zoomed out) its plane would repeat beside the
+    // screen and be cut at its edges, so it is left out for those frames.
+    if ex > 8 && bg <= 1 && io16(mem, 8) == 0x0a0b && io16(mem, 10) == 0x0b0a && ffta_terrain(mem, 2) && !ffta_movement_grid(mem, bg) {
+        out[..rw].fill(TRANSPARENT);
+    }
 }
 
 fn render_text_bg_hardware(

@@ -39,7 +39,8 @@ impl Engine {
         let Some(feet) = battle::facing_anchor(bus) else { self.facing.lit = None; return };
         if let Some(lit) = battle::facing_lit(bus) { self.facing.lit = Some(lit); }
         let (rw, rh) = (mem::render_width(), mem::render_height());
-        let (ox, oy) = (mem::extra() as f32 + feet[0], mem::extra_y() as f32 + feet[1]);
+        // Zoomed out, the arrows keep their size (they are to be tapped).
+        let (ox, oy) = self.native_texture(feet[0], feet[1]);
         let blend = |under: i32, (r, g, b): (u32, u32, u32), alpha: u32| -> i32 {
             let u = under as u32;
             let mix = |c: u32, shift: u32| (c * alpha + ((u >> shift) & 255) * (256 - alpha)) / 256;
