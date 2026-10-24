@@ -3100,6 +3100,19 @@ fn render_sprites_extent(
             && (0x2d4..=0x2d9).contains(&(a2 & 1023)) && (a2 >> 10) & 3 == 0 {
             continue;
         }
+        // Choosing units: the button hints at the top ("L View", "START: To
+        // Battle!", "R Info"; measured tiles 0x2f0, 0x2f8, 0x314-0x31c at y 16-17),
+        // which touch shows as its own buttons.
+        if mem.ffta_dialogue.hide_info_hint && mem.ffta_dialogue.docked && (a0 & 255) < 32 && (a2 >> 10) & 3 == 0
+            && matches!(a2 & 1023, 0x2f0 | 0x2f8 | 0x314 | 0x318 | 0x31c) && crate::ffta_battle_mouse::battle_cursor(mem) {
+            continue;
+        }
+        // A unit's Status in battle: "R Info" on its Abilities page (tiles
+        // 0xdd0/0xdd4, palette 13, y 62), a touch button there instead.
+        if mem.ffta_dialogue.hide_info_hint && mem.ffta_dialogue.docked && mem.menu_screen.frame && matches!(a2, 0xdd0 | 0xdd4)
+            && (a0 & 255) == 62 && crate::ffta_battle_mouse::battle_cursor(mem) {
+            continue;
+        }
         // Unused FFTA OAM slots park offscreen at (248,168). Vertical zoom
         // would unwrap that Y coordinate and expose tile zero in the sky.
         // Verified host objects carry full coordinates and are not filtered.

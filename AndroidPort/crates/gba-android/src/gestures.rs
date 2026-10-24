@@ -37,6 +37,10 @@ pub(crate) enum Gesture {
     /// the frame it touched), the game runs faster (`TURBO`); a short touch
     /// is a tap.
     Turbo { start: (f32, f32), since: u64 },
+    /// A finger on an entry of a battle list (`row` at `native`): a tap
+    /// chooses it; held, the game's cursor goes to it and its HELP is shown
+    /// (SELECT) until the finger lifts (A closes it).
+    Help { start: (f32, f32), since: u64, native: (f32, f32), row: u8, shown: bool },
 }
 
 /// Frames emulated per frame shown while a finger holds the battle on.
@@ -150,10 +154,16 @@ impl Engine {
             return true;
         }
         // Unit status screens, and the pub's mission pages: sideways swipes turn.
-        let pages = self.town_buttons() && crate::pub_touch::mission_pages(&self.machine.bus) && crate::pub_touch::notice(&self.machine.bus).is_none();
-        if (self.menu_layout.is_some() && crate::engine::party_status(&self.machine.bus)) || pages {
+        let pages = (self.town_buttons() || gba_core::ffta_battle_mouse::battle_cursor(&self.machine.bus)) && crate::pub_touch::mission_pages(&self.machine.bus) && crate::pub_touch::notice(&self.machine.bus).is_none();
+        if (self.menu_layout.is_some() && (crate::engine::party_status(&self.machine.bus) || crate::battle_ui::status(&self.machine.bus))) || pages {
             self.gesture = Some(Gesture::Unit { start: (x, y), moved: false, switched: false });
             return true;
+        }
+        if let Some(native) = self.docked_native(x, y).filter(|_| crate::battle_ui::window(&self.machine.bus).is_some()) {
+            if let Some(row) = battle::MenuScene::read(&self.machine.bus).and_then(|m| m.hit(native.0, native.1)) {
+                self.gesture = Some(Gesture::Help { start: (x, y), since: self.machine.bus.frames, native, row, shown: false });
+                return true;
+            }
         }
         if self.battle_pan() {
             let e = &self.machine.bus.ewram;
@@ -238,7 +248,7 @@ impl Engine {
                 self.gesture = Some(Gesture::Pan { start, camera, moved });
             }
             // Held anywhere: the finger may slide.
-            Some(Gesture::Dialogue { .. } | Gesture::Turbo { .. }) | None => {}
+            Some(Gesture::Dialogue { .. } | Gesture::Turbo { .. } | Gesture::Help { .. }) | None => {}
         }
     }
     /// The finger is lifted (or the gesture cancelled).
@@ -249,6 +259,8 @@ impl Engine {
             Some(Gesture::Party { start, moved: false, .. } | Gesture::Unit { start, moved: false, .. } | Gesture::Pan { start, moved: false, .. }) => self.tap(start.0, start.1, false),
             // Lifted before it hurried: a tap.
             Some(Gesture::Dialogue { start, since, .. }) if self.machine.bus.frames < since + crate::text_speed::HOLD => self.tap(start.0, start.1, false),
+            Some(Gesture::Help { shown: true, .. }) => { self.mouse.cancel(); battle::press(&mut self.machine.bus, 0x3fe); }
+            Some(Gesture::Help { start, .. }) => self.tap(start.0, start.1, false),
             Some(Gesture::Turbo { start, since }) if self.machine.bus.frames < since + crate::text_speed::HOLD => self.tap(start.0, start.1, false),
             Some(Gesture::Shop { start, native, vertical: None, .. }) => self.shop_rows_tap(start.0, start.1, native.0, native.1),
             Some(Gesture::Shop { native, vertical: Some(vertical), samples: [(f0, x0, y0), (f1, x1, y1)], anchor, .. }) => {
@@ -298,8 +310,21 @@ impl Engine {
         self.drive_dialogue_hold(since, &mut arrow);
         if matches!(self.gesture, Some(Gesture::Dialogue { .. })) { self.gesture = Some(Gesture::Dialogue { start, since, arrow }); }
     }
+    /// Once per frame: a finger held on a battle list's entry shows its help.
+    fn drive_help(&mut self) {
+        let Some(Gesture::Help { start, since, native, row, shown: false }) = self.gesture else { return };
+        let bus = &mut self.machine.bus;
+        if bus.frames < since + crate::text_speed::HOLD { return; }
+        let Some(menu) = battle::MenuScene::read(bus) else { self.gesture = None; return };
+        if menu.selected != row { battle::aim(bus, native.0, native.1, false); return; }
+        if !battle::idle(bus) { return; }
+        self.mouse.cancel();
+        battle::press(&mut self.machine.bus, 0x3fb);
+        self.gesture = Some(Gesture::Help { start, since, native, row, shown: true });
+    }
     /// Once per frame: repeats a held quantity arrow.
     pub(crate) fn drive_gestures(&mut self) {
+        self.drive_help();
         let Some(Gesture::Quantity { up, since, .. }) = self.gesture else { return };
         let bus = &self.machine.bus;
         if shop::quantity(bus).is_none() { self.gesture = None; return; }

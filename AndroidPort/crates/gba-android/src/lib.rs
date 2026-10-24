@@ -13,6 +13,7 @@ mod shop_scroll;
 mod laws;
 mod pub_touch;
 mod deploy_touch;
+mod battle_ui;
 mod text_speed;
 mod title_touch;
 mod world_map;

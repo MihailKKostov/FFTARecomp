@@ -354,7 +354,15 @@ fn main() -> Result<(), String> {
                 Event::Pointer(_, x, y) => engine.pointer_up(*x, *y, false),
                 Event::Shot(name) => shots.push(name.clone()),
                 Event::Speed(_) => {}
-                Event::Dump(name) => dumps.push(name.clone()),
+                Event::Dump(name) => {
+                    if std::env::var_os("FFTA_MENU_DEBUG").is_some() {
+                        let bus = &engine.machine.bus;
+                        eprintln!("MENU {name} menu={:?} scene={:?} facing={:?}", gba_core::ffta_battle_mouse::MenuScene::read(bus),
+                            gba_core::ffta_battle_mouse::Scene::read(bus).map(|s| (s.selected, s.cells.iter().filter(|c| c.range > 0).count())),
+                            gba_core::ffta_battle_mouse::facing_center(bus));
+                    }
+                    dumps.push(name.clone())
+                }
                 Event::State(path) => std::fs::write(path, engine.save_state()).map_err(|e| e.to_string())?,
                 Event::Checkpoint => engine.checkpoint()?,
                 Event::Save => engine.save()?,

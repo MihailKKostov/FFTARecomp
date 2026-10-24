@@ -297,6 +297,7 @@ impl Engine {
             };
             if self.touch_enabled && self.machine.bus.ffta_dialogue.docked && self.notice_tap(nx,ny) {return;}
             if self.touch_enabled && self.deploy_tap(nx,ny) {return;}
+            if self.touch_enabled && self.battle_pages_tap(nx,ny) {return;}
             if let Some(keys)=self.usa.then(||crate::title_touch::keys(&self.machine.bus,nx,ny).or_else(||crate::title_touch::slot_keys(&self.machine.bus,nx,ny))).flatten(){
                 self.mouse.cancel();
                 if !keys.is_empty(){battle::press_sequence(&mut self.machine.bus,&keys);}
@@ -314,6 +315,25 @@ impl Engine {
         }
         #[cfg(target_os="android")]
         eprintln!("FFTA_TOUCH click x={x:.3} y={y:.3} handled={handled}");
+    }
+    /// Native coordinates of a point (fractions) on a docked battle window
+    /// (a list the game draws, docked at the bottom), as `tap` maps it.
+    pub(crate) fn docked_native(&self,x:f32,y:f32)->Option<(f32,f32)>{
+        let (px,py)=(x*self.ui_window.0 as f32,y*self.ui_window.1 as f32);
+        let state=&self.machine.bus.ffta_dialogue;
+        let index=if matches!(state.extra.kind,PanelKind::Actions|PanelKind::Notice)&&state.extra.active(){1}
+            else if state.action_layout {0} else {return None};
+        if battle::MenuScene::read(&self.machine.bus).is_none() || crate::deploy_touch::shown(&self.machine.bus) {return None;}
+        let source=pieces(&self.machine.bus,self.ui_band(),index,self.town_menu).iter().find_map(|l|l.source(px,py))?;
+        let mut nx=(source%480) as f32-120.;let ny=(source/480) as f32;
+        if state.extra.kind!=PanelKind::Notice {
+            let bounds=if index==0{dialogue::panel_bounds(&state.pixels,&state.backing)}else{dialogue::panel_bounds(&state.extra.pixels,&state.extra.backing)};
+            if let Some(b)=bounds{
+                let d=((b[2]-b[0]) as f32*(state.style.length.clamp(1.,2.)-1.)).round();
+                nx+=if b[0]+b[2]>=240{d}else{-d};
+            }
+        }
+        Some((nx,ny))
     }
     /// A tap that hits nothing presses A (moves dialogue and messages on).
     /// Touch-only portrait: not where the player chooses by tapping, which a
@@ -343,6 +363,8 @@ impl Engine {
         else if key==crate::pub_touch::CLOSE_RUMOR {self.close_rumor();}
         else if key==crate::pub_touch::YES {self.notice_yes();}
         else if key==crate::engine::FREE_HOME {self.free_return();}
+        else if key==crate::battle_ui::OPEN_SYSTEM {self.open_system();}
+        else if key==crate::battle_ui::CLOSE_SYSTEM {self.close_system();}
         else if key==0x3fd && gba_core::ppu::shop_info_open(&self.machine.bus) {battle::press_sequence(&mut self.machine.bus,&[0x2ff,0x3fd]);}
         else {battle::press(&mut self.machine.bus,key);}
     }
