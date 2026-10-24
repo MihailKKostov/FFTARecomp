@@ -126,6 +126,99 @@ user's save: world map menus, Party/status, Shop with a full purchase, Pub
 Verified frame by frame (1080x2400, every 1-8 frames) on the shop purchase,
 Pub (Rumors), Prison and Party flows, plus landscape shop frames.
 
+## 0.59-android-preview
+
+**Battles designed for touch** (the battle audit: not only completable, but
+laid out for a phone held upright, as the town, shop, pub and Party screens
+were).
+
+Nothing unreachable (`battle_ui.rs`):
+- The battle's windows share one list (`MenuScene`), so they are told apart
+  by their titles: the title row's glyph tiles (BG2, from tile 0x007 at the
+  window's left edge to 0x008) are hashed (FNV-1a): MENU (the unit's
+  commands), ACTION, the ability lists, ITEM, SYSTEM, and LIST (Turn Order).
+- System (Turn Order, Mission, Laws, Options, Flee, Save Now), which only
+  START in the free cursor reached: a System button over the commands (B,
+  then START) and the free cursor; its Return goes back to the unit's
+  commands.
+- A unit's Status in battle: Learning (R on its Abilities page, where the
+  game's "R Info" hint is, tiles 0xdd0/0xdd4, now hidden) shows the
+  abilities being learned; Learning again goes back. Mission pages and the
+  law list have Return.
+- Hold a finger on an entry of a battle list for its help (SELECT); a drag
+  over a list scrolls it.
+
+The commands and the confirmation (`battle_windows.rs`):
+- The game's lists are drawn again from their own tiles, whole and docked
+  beside the unit's panel (the game's are cut at the screen's edge), each
+  entry a tap.
+- The commands are flattened: Move, then Action's entries (Fight, the
+  ability sets, Item) in place of Action, Wait, Status: one tap each. They
+  are read in a silent run from a snapshot (the cursor to Action, A, the
+  window once still); greyed after acting, the commands stay as they are.
+- A target chosen: the preview as a card over the panels (its record at
+  EWRAM 0x0200f588: +0x2d the hit chance, +0x2e the HP taken, negative
+  when restored): "Hit 40%", "Damage 23" (or "Restores N") large, then Do
+  it and Cancel. Do it confirms the preview and the game's own Do it.
+- Not done: how many units an area ability takes in. The range planes
+  (EWRAM 0x8190/0x8290) do not follow the effect area at the cursor; there
+  was nothing measured to count from.
+
+The field (`battle_ui.rs`, `facing_touch.rs`, `turn_order.rs`):
+- Tap a unit while the commands are open: it is looked at (B for the free
+  cursor, the cursor to its cell, its panel shows); tap it again for its
+  Status (the game offers that unit Status alone, which is chosen). In the
+  free cursor a unit is looked at first, never chosen at once; Return goes
+  back to the unit whose turn it is.
+- Moving or targeting, a cell out of range is looked at (the cursor goes
+  there, its unit's panel shows) instead of an A that only buzzed.
+- Panning: with a list open the game does not scroll the field's layers
+  (BG control 0x4c03/0x4e02) from its camera, so 0.58's pan moved the
+  units over a still field. Their scroll is now set with the camera: the
+  camera less the field's origin (EWRAM 0x7f68; measured: camera -55,274,
+  origin -160,264, scroll 105,10), in the registers and the game's copies
+  of them (IWRAM 0x942: BG0-3CNT, then the scrolls). Center (top) glides
+  the camera back to where the game had it.
+- Facing: four large arrows on the ground around the unit's feet, along
+  the field's diagonals, the side it faces lit (the game's lit arrow
+  animates, tiles 0x136-0x138 and 0x13a-0x13c), and "Choose a direction".
+  The game's small arrows over its head are hidden. A tap toward a side
+  turns the unit there and ends the turn, read from its feet. Panning stops
+  with the unit at the screen's edge: the game leaves out sprites beyond
+  its screen, and the arrows tell that the facing is asked.
+- The enemy's turn: "Hold to speed up" for a while (the first 3 times),
+  and a fast-forward sign while a finger holds it on. Not over the
+  preview, which waits for the player.
+- The turn order, in the sky under the laws: "Next" and the four units
+  after the one whose turn it is, in the game's own lettering (enemies
+  red). Read in a silent run (B, START, Turn Order, the LIST window once
+  still) with the list's palette (its red is loaded only while it is
+  shown), each turn; kept until the facing is chosen.
+- The laws' banner stays during the enemy's turn: it is in the sky, and
+  enemies break laws too.
+
+Zoom out (`battle_zoom.rs`):
+- Zoom out (top left), or a pinch: the whole field at half size. The game
+  draws the field beyond its screen when given margins (sprites and BG
+  layers), so the frame is drawn with margins twice as wide and tall (up to
+  320 rows a side) and made half size into the usual texture, two by two,
+  about the screen's centre; the touch layer's windows, cards and buttons
+  keep their size. Taps go back through the same scale. Fingers lifted
+  from a pinch settle on half or whole size.
+- Zoomed out the camera keeps the field centred, also after the game moves
+  it to its cursor, as near as keeps what is chosen on the game's own
+  screen (the facing's arrows are read there).
+- Units beyond the game's screen are drawn by the port, not in OAM: zoomed
+  out they are found by the units' tables (the clan's at EWRAM 0x98, the
+  others' at 0x2fdc, 0x108 apart: HP at +0, the cell at +0xde; a clan unit
+  not sent has 0 at +0xe3).
+- While a unit sets off, the movement overlay's scroll leaves what
+  `ffta_movement_grid` checks, and its 256-pixel plane would repeat beside
+  the screen: zoomed out it is left out for those frames.
+- Not while choosing which units to send (the roster's ring and arrows are
+  the game's sprites at the screen's edges), nor on screens over the field
+  (Status).
+
 ## 0.58-android-preview
 
 **Battles from deployment to the results, by touch** (the 0.57 audit).
