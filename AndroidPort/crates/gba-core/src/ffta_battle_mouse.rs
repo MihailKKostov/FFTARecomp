@@ -809,6 +809,29 @@ impl Unit {
         })
     }
 }
+/// The feet of the unit choosing its facing: under the game's arrows (over
+/// its head), else the arrows' centre. Taps choose a side from here.
+pub fn facing_anchor(mem: &MemMap) -> Option<[f32; 2]> {
+    let c = facing_center(mem)?;
+    Some(units(mem).iter().map(|u| u.feet).filter(|f| (f[0] - c[0]).abs() <= 8. && (8. ..64.).contains(&(f[1] - c[1])))
+        .min_by(|a, b| (a[1] - c[1]).total_cmp(&(b[1] - c[1]))).unwrap_or(c))
+}
+/// The side the facing arrows light (the unit's facing now): the key
+/// that turns it there. The lit arrow's tiles animate (0x136-0x138 above,
+/// 0x13a-0x13c below), its first frame like the others': None then.
+pub fn facing_lit(mem: &MemMap) -> Option<u16> {
+    let c = facing_center(mem)?;
+    mem.oam.chunks_exact(8).find_map(|o| {
+        let (a, b, t) = (h(o, 0)?, h(o, 2)?, h(o, 4)?);
+        if a & 0xff00 != 0 || b & 0xee00 != 0 || !(0x135..=0x13c).contains(&t) || matches!(t, 0x135 | 0x139) { return None; }
+        let (right, below) = ((b & 511) as f32 + 8. > c[0], (a & 255) as f32 + 4. > c[1]);
+        Some(match (right, below) { (false, false) => 0x3df, (true, false) => 0x3bf, (false, true) => 0x37f, (true, true) => 0x3ef })
+    })
+}
+/// A unit is drawn at native (x, y) (also with a menu over the field).
+pub fn unit_drawn_at(mem: &MemMap, x: f32, y: f32) -> bool {
+    x.is_finite() && y.is_finite() && units(mem).iter().any(|u| u.drawn_at(mem, x, y))
+}
 /// Exact packed-quarter style query from USA0801D58C / EUR0801E6FC.
 pub fn range_value(mem: &MemMap, x: u8, y: u8) -> u8 {
     if x >= 16 || y >= 16 || mem.ewram[0x8168] == 0 || mem.ewram[0x8169] != 3 {
@@ -871,7 +894,7 @@ pub fn aim(mem: &mut MemMap, x: f32, y: f32, confirm: bool) -> bool {
     }
     if crate::ffta_shop_mouse::aim(mem,x,y,confirm){return true;}
     if world_cursor(mem).is_some() {return world_select(mem,x,y,confirm);}
-    if let Some(center)=facing_center(mem) {
+    if let Some(center)=facing_anchor(mem) {
         if !confirm && (mem.ffta_battle_mouse.buttons.contains(&0x3fe)
             || (mem.ffta_battle_mouse.button_key==0x3fe && mem.ffta_battle_mouse.button_hold>0)) {return true;}
         let dx=x-center[0];let dy=(y-center[1])*2.;
@@ -893,12 +916,15 @@ pub fn aim(mem: &mut MemMap, x: f32, y: f32, confirm: bool) -> bool {
         return if let Some(index) = scene.hit(x,y) { menu_select(mem,index,confirm) }
         else { mem.ffta_battle_mouse.cancel(); false };
     }
-    let cell = Scene::read(mem).and_then(|s| s.pick(mem, x, y));
-    let Some(c) = cell else {
+    let scene = Scene::read(mem);
+    let Some(c) = scene.as_ref().and_then(|s| s.pick(mem, x, y)) else {
         mem.ffta_battle_mouse.cancel();
         return false;
     };
-    select(mem, c.x, c.y, confirm)
+    // While moving or targeting, a cell out of range is only looked at (the
+    // cursor goes there and its unit's panel shows); A there would only buzz.
+    let ranged = scene.is_some_and(|s| s.cells.iter().any(|c| c.range > 0));
+    select(mem, c.x, c.y, confirm && (c.range > 0 || !ranged))
 }
 pub fn back(mem: &mut MemMap) {
     press(mem,0x3fd);

@@ -27,20 +27,61 @@ const RIGHT: u16 = 0x3ef;
 /// range of single buttons: none of these is a mask the game reads).
 pub(crate) const OPEN_SYSTEM: u16 = 6;
 pub(crate) const CLOSE_SYSTEM: u16 = 7;
+pub(crate) const RECENTER: u16 = 8;
+/// The battle camera's scroll (EWRAM, two i16: x, y; gestures.rs).
+const CAMERA: usize = 0x7f64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Window { Commands, Action, Abilities, Items, System, Other }
+pub enum Window { Commands, Action, Abilities, Items, System, Order, Other }
 
 /// Title hashes (FNV-1a over the title tiles' 4-bpp pixels).
-const TITLES: [(u64, Window); 5] = [
+const TITLES: [(u64, Window); 6] = [
     (0x5952_a0a2_7e52_8322, Window::Commands),
     (0x763c_d545_cd71_d754, Window::Action),
     (0xc31e_3209_61ea_b9ca, Window::Abilities),
     (0x14f7_b225_fa64_6b85, Window::Items),
     (0xba3d_5307_69f2_1ebf, Window::System),
+    // System's Turn Order ("LIST").
+    (0x5891_5da2_49c7_ce41, Window::Order),
 ];
 
 fn half(data: &[u8], offset: usize) -> u16 { u16::from_le_bytes([data[offset], data[offset + 1]]) }
+
+pub(crate) fn camera(bus: &MemMap) -> (i16, i16) {
+    let e = &bus.ewram;
+    (i16::from_le_bytes([e[CAMERA], e[CAMERA + 1]]), i16::from_le_bytes([e[CAMERA + 2], e[CAMERA + 3]]))
+}
+/// The game's copies of BG0-3CNT and their scrolls (IWRAM), copied to the
+/// registers each frame (USA, measured).
+const BG_SHADOW: usize = 0x942;
+/// Where the camera puts the field's origin (EWRAM, two i16).
+const FIELD_ORIGIN: usize = 0x7f68;
+/// Moves the battle camera: the units follow it each frame, but the field's
+/// layers (BG control 0x4c03/0x4e02, which may be BG0-1 or BG2-3) only while
+/// the field's cursor runs. With a list open the game leaves their scroll as
+/// it was, so it is set here too: the camera less the field's origin
+/// (measured: camera -55,274, origin -160,264, scroll 105,10).
+pub(crate) fn set_camera(bus: &mut MemMap, (x, y): (i16, i16)) {
+    bus.ewram[CAMERA..CAMERA + 2].copy_from_slice(&x.to_le_bytes());
+    bus.ewram[CAMERA + 2..CAMERA + 4].copy_from_slice(&y.to_le_bytes());
+    let e = &bus.ewram;
+    let origin = (i16::from_le_bytes([e[FIELD_ORIGIN], e[FIELD_ORIGIN + 1]]), i16::from_le_bytes([e[FIELD_ORIGIN + 2], e[FIELD_ORIGIN + 3]]));
+    let scroll = ((x.wrapping_sub(origin.0) as u16 & 511).to_le_bytes(), (y.wrapping_sub(origin.1) as u16 & 511).to_le_bytes());
+    for bg in 0..4 {
+        let cnt = half(&bus.io, 8 + bg * 2);
+        if !matches!(cnt, 0x4c03 | 0x4e02) || half(&bus.iwram, BG_SHADOW + bg * 2) != cnt { continue; }
+        for (at, data) in [(BG_SHADOW + 8 + bg * 4, &mut bus.iwram), (0x10 + bg * 4, &mut bus.io)] {
+            data[at..at + 2].copy_from_slice(&scroll.0);
+            data[at + 2..at + 4].copy_from_slice(&scroll.1);
+        }
+    }
+}
+/// What the player is choosing (a list, a cell): the game places the camera
+/// anew when it changes.
+fn choosing(bus: &MemMap) -> Option<u32> {
+    if let Some(m) = battle::MenuScene::read(bus) { return Some(0x1_0000 | (title_hash(bus, m.origin).unwrap_or(0) as u32 & 0xff00) | m.count as u32); }
+    battle::Scene::read(bus).map(|s| 0x2_0000 | (s.cells.iter().any(|c| c.range > 0) as u32) << 8 | s.selected.0 as u32 * 16 + s.selected.1 as u32)
+}
 
 /// The title of the list window whose first entry is at native `origin`.
 pub fn title_hash(bus: &MemMap, origin: [i32; 2]) -> Option<u64> {
@@ -99,12 +140,82 @@ impl Engine {
     }
     /// Once a frame: finishes leaving System for the unit's commands once the
     /// free cursor is back.
+    /// A pan began (gestures.rs): where the game had the camera.
+    pub(crate) fn note_pan(&mut self, from: (i16, i16)) {
+        if self.pan_home.is_none() { self.pan_home = choosing(&self.machine.bus).map(|k| (from, k)); }
+    }
+    /// Panned away from where the game put the camera.
+    fn panned(&self) -> bool {
+        self.pan_home.is_some_and(|(home, _)| { let c = camera(&self.machine.bus); (c.0 - home.0).abs() + (c.1 - home.1).abs() > 8 })
+    }
+    /// Center: the camera glides back to where the game had it.
+    pub(crate) fn recenter(&mut self) { self.glide = self.pan_home.map(|h| h.0); }
+    /// Once a frame: forgets the camera's home once the game moves on, and
+    /// glides the camera toward it (a third of the way a frame).
+    fn drive_camera(&mut self) {
+        let bus = &mut self.machine.bus;
+        let key = choosing(bus);
+        if self.pan_home.is_some_and(|(_, k)| Some(k) != key) { self.pan_home = None; self.glide = None; }
+        let Some(to) = self.glide else { return };
+        let c = camera(bus);
+        let step = |a: i16, b: i16| { let d = b as i32 - a as i32; (a as i32 + if d.abs() <= 2 { d } else { d / 3 + d.signum() }) as i16 };
+        let next = (step(c.0, to.0), step(c.1, to.1));
+        set_camera(bus, next);
+        if next == to { self.glide = None; self.pan_home = None; }
+    }
     pub(crate) fn drive_battle_ui(&mut self) {
+        self.drive_camera();
+        if let Some(deadline) = self.inspect_status {
+            let bus = &self.machine.bus;
+            if bus.frames > deadline { self.inspect_status = None; }
+            else if battle::idle(bus) && window(bus).is_some_and(|(w, s)| w == Window::Commands && s.count == 1) {
+                self.inspect_status = None;
+                battle::press(&mut self.machine.bus, A);
+            }
+        }
+        if let Some((x, y, deadline)) = self.inspect {
+            let bus = &self.machine.bus;
+            if bus.frames > deadline { self.inspect = None; }
+            else if self.free_cursor() && battle::idle(bus) {
+                self.inspect = None;
+                // The free cursor starts on the unit whose turn it is: that
+                // one tapped goes straight back to its commands.
+                let cell = battle::Scene::read(bus).and_then(|s| s.pick(bus, x, y).map(|c| (c.x, c.y)));
+                if cell.is_none() || cell == self.free_home { self.free_return(); } else { battle::aim(&mut self.machine.bus, x, y, false); }
+            }
+        }
         if let Some(at) = self.free_return_after {
             let bus = &self.machine.bus;
             if bus.frames > at + 120 { self.free_return_after = None; }
             else if bus.frames >= at && self.free_cursor() && battle::idle(bus) { self.free_return_after = None; self.free_return(); }
         }
+    }
+    /// A tap on a unit on the field while the unit whose turn it is chooses
+    /// a command: that unit is looked at (B for the free cursor, which then
+    /// goes to it: its panel shows; Return comes back). True when taken.
+    pub(crate) fn inspect_tap(&mut self, x: f32, y: f32) -> bool {
+        let bus = &self.machine.bus;
+        if !window(bus).is_some_and(|w| w.0 == Window::Commands) || !battle::unit_drawn_at(bus, x, y) || !battle::idle(bus) { return false; }
+        self.mouse.cancel();
+        self.free_home = None;
+        battle::press(&mut self.machine.bus, B);
+        self.inspect = Some((x, y, self.machine.bus.frames + 90));
+        true
+    }
+    /// A tap at native (x, y) in the free cursor: whether it confirms (A).
+    /// A unit is looked at first (the cursor goes to it, its panel shows);
+    /// a tap on the unit it rests on then confirms: the game offers that
+    /// unit's one command, Status, which is chosen (`inspect_status`); on the
+    /// unit whose turn it is, its commands. An empty cell is only looked at.
+    /// None outside the free cursor.
+    pub(crate) fn free_cursor_confirm(&mut self, x: f32, y: f32) -> Option<bool> {
+        let bus = &self.machine.bus;
+        if !self.free_cursor() { return None; }
+        let scene = battle::Scene::read(bus)?;
+        let cell = scene.pick(bus, x, y).map(|c| (c.x, c.y));
+        let on = cell == Some(scene.selected);
+        if on && cell != self.free_home && battle::unit_drawn_at(bus, x, y) { self.inspect_status = Some(bus.frames + 60); }
+        Some(on && (cell == self.free_home || battle::unit_drawn_at(bus, x, y)))
     }
     /// The mission's pages over a battle (System, Mission): the corner
     /// arrows turn them, as in the pub (pub_touch.rs). True when taken.
@@ -139,6 +250,7 @@ impl Engine {
             return Some(match kind {
                 // The unit's commands: nothing to go back to (units are
                 // looked at by tapping them); the System window.
+                Window::Commands if self.panned() => top(&[("System", OPEN_SYSTEM, false), ("Center", RECENTER, false)]),
                 Window::Commands => top(&[("System", OPEN_SYSTEM, false)]),
                 Window::System => top(&[("Return", CLOSE_SYSTEM, false)]),
                 _ => top(&[("Return", B, false)]),
@@ -148,6 +260,7 @@ impl Engine {
         if battle::Scene::read(bus).is_some() || facing {
             let back = if self.free_cursor() { crate::engine::FREE_HOME } else { B };
             let mut buttons = if self.free_cursor() { top(&[("System", OPEN_SYSTEM, false), ("Return", back, false)]) }
+                else if self.panned() { top(&[("Center", RECENTER, false), (if facing { "Back" } else { "Return" }, back, false)]) }
                 else { top(&[(if facing { "Back" } else { "Return" }, back, false)]) };
             // Facing: a tap toward a side turns the unit there and ends its
             // turn; the button ends it facing as it is.
@@ -163,6 +276,27 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_field_scrolls_with_the_camera_on_its_own_layers() {
+        let mut m = gba_core::Machine::new(vec![0; 0x200]);
+        let bus = &mut m.bus;
+        // Measured with the commands shown: the field on BG0-1, origin -160,264.
+        for (bg, cnt) in [0x4c03u16, 0x4e02, 0x5c08, 0x4a09].into_iter().enumerate() {
+            bus.io[8 + bg * 2..10 + bg * 2].copy_from_slice(&cnt.to_le_bytes());
+            bus.iwram[BG_SHADOW + bg * 2..BG_SHADOW + 2 + bg * 2].copy_from_slice(&cnt.to_le_bytes());
+        }
+        bus.ewram[FIELD_ORIGIN..FIELD_ORIGIN + 4].copy_from_slice(&[0x60, 0xff, 0x08, 0x01]);
+        set_camera(bus, (-55, 274));
+        assert_eq!(camera(bus), (-55, 274));
+        for bg in 0..2 {
+            assert_eq!((half(&bus.io, 0x10 + bg * 4), half(&bus.io, 0x12 + bg * 4)), (105, 10));
+            assert_eq!((half(&bus.iwram, BG_SHADOW + 8 + bg * 4), half(&bus.iwram, BG_SHADOW + 10 + bg * 4)), (105, 10));
+        }
+        // The lists' layers stay.
+        assert_eq!(half(&bus.io, 0x18), 0);
+        set_camera(bus, (-170, 260));
+        assert_eq!((half(&bus.io, 0x10), half(&bus.io, 0x12)), (502, 508));
+    }
     #[test]
     fn a_window_is_told_by_its_title_glyphs() {
         let mut m = gba_core::Machine::new(vec![0; 0x200]);

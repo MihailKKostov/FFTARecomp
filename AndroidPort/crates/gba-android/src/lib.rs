@@ -15,6 +15,8 @@ mod pub_touch;
 mod deploy_touch;
 mod battle_ui;
 mod battle_windows;
+mod facing_touch;
+mod turn_order;
 mod text_speed;
 mod title_touch;
 mod world_map;

@@ -53,6 +53,13 @@ pub(crate) const TURBO: usize = 4;
 /// 0x02007f40 subtracts it from the map's origin). The game clamps it to the
 /// map and keeps it until its cursor moves out of view.
 const CAMERA: usize = 0x7f64;
+/// Times "Hold to speed up" is shown (a session), and for how many frames.
+const TURBO_HINTS: u8 = 3;
+const TURBO_HINT_FRAMES: u64 = 150;
+/// When the battle began running on its own (0: no hint for this run), the
+/// last frame the player chose, and the hints shown.
+#[derive(Default)]
+pub(crate) struct TurboHint { since: Option<u64>, choosing: u64, count: u8 }
 
 /// Quantity arrows beside the game's quantity window (native, from WIN1).
 pub(crate) struct QuantityArrows { pub window: [i32; 4] }
@@ -249,13 +256,13 @@ impl Engine {
                 let (dx, dy) = ((x - start.0) * w, (y - start.1) * h);
                 let moved = moved || dx.hypot(dy) >= self.gesture_slop / 2.;
                 if moved && self.battle_pan() {
+                    self.glide = None;
+                    self.note_pan(camera);
                     // Screen pixels to native: the field's on-screen scale.
                     let scale = gba_core::mem::render_width() as f32 / self.world_rect[2].max(1.);
                     let to = |c: i16, d: f32| (c as f32 - d * scale).round().clamp(-1024., 1024.) as i16;
                     let (cx, cy) = (to(camera.0, dx), to(camera.1, dy));
-                    let e = &mut self.machine.bus.ewram;
-                    e[CAMERA..CAMERA + 2].copy_from_slice(&cx.to_le_bytes());
-                    e[CAMERA + 2..CAMERA + 4].copy_from_slice(&cy.to_le_bytes());
+                    crate::battle_ui::set_camera(&mut self.machine.bus, (cx, cy));
                 }
                 self.gesture = Some(Gesture::Pan { start, camera, moved });
             }
@@ -333,6 +340,44 @@ impl Engine {
         if self.machine.bus.frames < since + crate::text_speed::HOLD { return count; }
         if !self.battle_runs() { return count; }
         count.max(TURBO)
+    }
+    /// The battle held on (a finger down past `HOLD`, the battle running).
+    fn turbo_on(&self) -> bool {
+        matches!(self.gesture, Some(Gesture::Turbo { since, .. }) if self.machine.bus.frames >= since + crate::text_speed::HOLD) && self.battle_runs()
+    }
+    /// Once a frame (touch-only portrait): while the battle runs on its own
+    /// after the player's turn, "Hold to speed up" for a while (the first
+    /// `TURBO_HINTS` times), and the fast-forward sign while it is held on.
+    pub(crate) fn turbo_present(&mut self, dock: (i32, i32)) {
+        let frames = self.machine.bus.frames;
+        if !(self.usa && self.touch_enabled && self.machine.bus.ffta_dialogue.docked) { return; }
+        let (choosing, runs) = (self.battle_pan(), self.battle_runs());
+        let hint = &mut self.turbo_hint;
+        if choosing { hint.choosing = frames; }
+        if !runs { hint.since = None; }
+        else if hint.since.is_none() {
+            // A run straight after the player chose (not between messages).
+            let fresh = frames <= hint.choosing + 30 && hint.count < TURBO_HINTS;
+            hint.since = Some(if fresh { hint.count += 1; frames } else { 0 });
+        }
+        let (rw, rh) = (gba_core::mem::render_width(), gba_core::mem::render_height());
+        let ex = gba_core::mem::extra() as i32;
+        let bus = &self.machine.bus;
+        if self.turbo_on() {
+            // Two triangles, top right, under the laws' banner level.
+            let (x0, y0) = (ex + 240 - 44, dock.0 + 8);
+            crate::game_buttons::draw_card(bus, &mut self.pixels, rw, rh, x0, y0, 40, 18, &[]);
+            let fill = crate::engine::rgba_colors()[0x7fff];
+            for k in 0..2 {
+                let left = x0 + 9 + k * 12;
+                for dy in -6i32..=6 { for dx in 0..=(6 - dy.abs()) * 10 / 6 { let (x, y) = (left + dx, y0 + 14 + dy); if (0..rw as i32).contains(&x) && (0..rh as i32).contains(&y) { self.pixels[y as usize * rw + x as usize] = fill; } } }
+            }
+        } else if self.turbo_hint.since.is_some_and(|at| at > 0 && frames < at + TURBO_HINT_FRAMES) {
+            let text = "Hold to speed up";
+            let w = crate::game_buttons::text_width_scaled(&bus.rom, text, 1) + 24;
+            let (x0, y0) = (ex + (240 - w) / 2, dock.1 - crate::battle_windows::PANEL_ROWS - 32);
+            crate::game_buttons::draw_card(bus, &mut self.pixels, rw, rh, x0, y0, w, 16, &[(12, 0, text, false, 1)]);
+        }
     }
     /// Each emulated frame: a finger held on dialogue hurries it.
     pub(crate) fn drive_dialogue_gesture(&mut self) {

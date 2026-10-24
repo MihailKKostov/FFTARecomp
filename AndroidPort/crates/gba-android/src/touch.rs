@@ -260,6 +260,12 @@ impl Engine {
             &&!crate::deploy_touch::shown(&self.machine.bus);
         let town=state.town_layout||state.shop_layout;
         let docked=if ui {pieces(&self.machine.bus,band,index.unwrap(),self.town_menu).iter().find_map(|l|l.source(px,py))}else{None};
+        // A unit on the field tapped while the commands are open: looked at.
+        if docked.is_none() && self.touch_enabled && self.machine.bus.ffta_dialogue.docked {
+            let (nx,ny)=self.world_native(px,py);
+            if self.inspect_tap(nx,ny) {return;}
+        }
+        let state=&self.machine.bus.ffta_dialogue;
         if let Some(source)=docked{
             let i=index.unwrap();
             {
@@ -278,8 +284,7 @@ impl Engine {
                 if !handled && self.town_buttons() && self.pointer_menu_tap(nx,ny) {return;}
             }
         }else if !(ui&&(town||index==Some(1))){
-            let nx=(px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32-mem::extra() as f32;
-            let ny=(py-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32-mem::extra_y() as f32;
+            let (nx,ny)=self.world_native(px,py);
             // Portrait Party screens: the party above, the unit's screen below; taps between do nothing.
             let ny=match self.menu_layout {
                 Some(layout)=>match layout.hit(nx,ny) {
@@ -309,8 +314,9 @@ impl Engine {
             }
             // A target confirmed: its preview shows as the card (battle_windows.rs).
             let targeting=battle::Scene::read(&self.machine.bus).is_some_and(|s|s.cells.iter().any(|c|c.range==2));
+            let confirm=if self.touch_enabled && self.machine.bus.ffta_dialogue.docked {self.free_cursor_confirm(nx,ny).unwrap_or(true)} else {true};
             handled=if self.mouse.scene(&self.machine.bus).is_some(){self.mouse.aim(&self.machine.bus,nx,ny,true)}
-                else{battle::aim(&mut self.machine.bus,nx,ny,true)};
+                else{battle::aim(&mut self.machine.bus,nx,ny,confirm)};
             if handled && targeting {self.target_chosen();}
         }
         // A tap on nothing confirms (A) only where there is nothing to choose
@@ -320,6 +326,11 @@ impl Engine {
         }
         #[cfg(target_os="android")]
         eprintln!("FFTA_TOUCH click x={x:.3} y={y:.3} handled={handled}");
+    }
+    /// Native coordinates of screen pixels on the game picture.
+    pub(crate) fn world_native(&self,px:f32,py:f32)->(f32,f32){
+        ((px-self.world_rect[0])/self.world_rect[2]*mem::render_width() as f32-mem::extra() as f32,
+            (py-self.world_rect[1])/self.world_rect[3]*mem::render_height() as f32-mem::extra_y() as f32)
     }
     /// Native coordinates of a point (fractions) on a docked battle window
     /// (a list the game draws, docked at the bottom), as `tap` maps it.
@@ -370,6 +381,7 @@ impl Engine {
         else if key==crate::engine::FREE_HOME {self.free_return();}
         else if key==crate::battle_ui::OPEN_SYSTEM {self.open_system();}
         else if key==crate::battle_ui::CLOSE_SYSTEM {self.close_system();}
+        else if key==crate::battle_ui::RECENTER {self.recenter();}
         else if key==0x3fd && gba_core::ppu::shop_info_open(&self.machine.bus) {battle::press_sequence(&mut self.machine.bus,&[0x2ff,0x3fd]);}
         else {battle::press(&mut self.machine.bus,key);}
     }

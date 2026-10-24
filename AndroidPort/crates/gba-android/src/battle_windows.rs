@@ -31,7 +31,7 @@ const FRAMES_PER_TICK: u32 = 6;
 const RUN_FRAMES: u32 = 120;
 /// Native rows the unit's panel takes at the bottom (with a gap): lists too
 /// wide to stand beside it go above it.
-const PANEL_ROWS: i32 = 72;
+pub(crate) const PANEL_ROWS: i32 = 72;
 const PANEL_WIDTH: i32 = 136;
 
 fn half(data: &[u8], offset: usize) -> u16 { u16::from_le_bytes([data[offset], data[offset + 1]]) }
@@ -149,6 +149,23 @@ pub struct Flat {
     card_away: u32,
     /// The game's own list is drawn again (export_ui leaves its panel out).
     pub hide_game: bool,
+}
+
+/// Draws the codes `pixels` (`width` wide) at texture (x0, y0), unblended.
+/// `palette`: the BG palettes the codes are of (the game's, or kept).
+pub(crate) fn paste(bus: &MemMap, palette: &[u8], out: &mut [i32], rw: usize, rh: usize, x0: i32, y0: i32, width: usize, pixels: &[u8]) {
+    let colors = crate::engine::rgba_colors();
+    for (i, &code) in pixels.iter().enumerate() {
+        let (tx, ty) = (x0 + (i % width) as i32, y0 + (i / width) as i32);
+        if code == 0 || !(0..rw as i32).contains(&tx) || !(0..rh as i32).contains(&ty) { continue; }
+        let c = half(palette, ((code >> 4) as usize * 16 + (code & 15) as usize) * 2) & 0x7fff;
+        out[ty as usize * rw + tx as usize] = colors[crate::world_map::faded(bus, c, 0x04) as usize];
+    }
+}
+
+impl Engine {
+    /// No silent run or choice of Action's entries under way.
+    pub(crate) fn flat_idle(&self) -> bool { self.flat.run.is_none() && self.flat.goal.is_none() }
 }
 
 /// Draws `image` into the texture with its top left at texture (x0, y0).

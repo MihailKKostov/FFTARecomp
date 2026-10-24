@@ -3092,8 +3092,15 @@ fn render_sprites_extent(
             }
         }
     });
+    // Choosing the facing: touch draws its own arrows around the unit
+    // (facing_touch.rs), so the game's small ones over its head are hidden.
+    let facing_drawn = mem.ffta_dialogue.hide_info_hint && mem.ffta_dialogue.docked
+        && crate::ffta_battle_mouse::facing_center(mem).is_some();
     for ([a0, a1, a2], coordinates, owner, stats_background, stats_inner_padding, guest_slot) in expanded {
         if !crate::menu_screen::sprite_visible(mem, guest_slot, a0, a1, a2) {
+            continue;
+        }
+        if facing_drawn && (0x135..=0x13c).contains(&(a2 & 1023)) && a0 & 0xff00 == 0 {
             continue;
         }
         if mem.ffta_dialogue.hide_info_hint && mem.ffta_dialogue.docked && mem.ffta_dialogue.shop_layout
