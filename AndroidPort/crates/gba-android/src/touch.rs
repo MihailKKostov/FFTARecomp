@@ -237,6 +237,8 @@ impl Engine {
             else {self.press_button(key);}
             return;
         }
+        // The battle's lists drawn again (battle_windows.rs).
+        if self.battle_windows_tap(px,py) {return;}
         // The shown laws open and close the whole list; with it open, any tap closes it.
         if self.laws.screen_banner.is_some_and(|(a,b)|py>=a && py<b) {self.mouse.cancel();self.laws.toggle();return;}
         if self.laws.open {self.laws.open=false;return;}
@@ -305,8 +307,11 @@ impl Engine {
                 eprintln!("FFTA_TOUCH title x={nx:.1} y={ny:.1} keys={keys:x?}");
                 return;
             }
+            // A target confirmed: its preview shows as the card (battle_windows.rs).
+            let targeting=battle::Scene::read(&self.machine.bus).is_some_and(|s|s.cells.iter().any(|c|c.range==2));
             handled=if self.mouse.scene(&self.machine.bus).is_some(){self.mouse.aim(&self.machine.bus,nx,ny,true)}
                 else{battle::aim(&mut self.machine.bus,nx,ny,true)};
+            if handled && targeting {self.target_chosen();}
         }
         // A tap on nothing confirms (A) only where there is nothing to choose
         // (dialogue, messages): see `blind_confirm`.
@@ -453,6 +458,8 @@ impl Engine {
         for i in 0..2 {
             let layouts=pieces(&self.machine.bus,band,i,self.town_menu);
             if layouts.is_empty(){continue;}
+            // The battle's list is drawn again into the picture.
+            if i==1 && self.flat.hide_game {continue;}
             let state=&self.machine.bus.ffta_dialogue;
             let pixels=if i==0{&state.pixels}else{&state.extra.pixels};
             let stats=i==1&&state.extra.kind==PanelKind::Stats;

@@ -69,6 +69,7 @@ fn glyph(rom: &[u8], ch: char) -> Option<([[u8; 16]; 16], usize)> {
         'a'..='z' => 36 + ch as usize - 'a' as usize,
         '<' => 92,
         '>' => 93,
+        '%' => return percent(rom),
         _ => return None,
     };
     let base = FONT + cell * 128;
@@ -81,6 +82,39 @@ fn glyph(rom: &[u8], ch: char) -> Option<([[u8; 16]; 16], usize)> {
     }
     let width = (0..16).rev().find(|&x| pixels.iter().any(|row| row[x] != 0)).map_or(4, |x| x + 1);
     Some((pixels, width))
+}
+
+/// '%', which the menu font lacks: drawn as its digits are (measured on
+/// '0': outline index 1, fill 3, a shadow 2 under and right of the fill),
+/// their height.
+fn percent(rom: &[u8]) -> Option<([[u8; 16]; 16], usize)> {
+    let (zero, _) = glyph(rom, '0')?;
+    let (edge, fill, shadow) = (1u8, 3u8, 2u8);
+    let top = zero.iter().position(|r| r.iter().any(|&i| i != 0))?;
+    let bottom = zero.iter().rposition(|r| r.iter().any(|&i| i != 0))?;
+    // Rings over and under a slash, as tall as the digits; outlined like them.
+    const SHAPE: [&str; 11] = [
+        ".##...#.", "#..#..#.", "#..#.#..", ".##..#..", "....#...", "....#...",
+        "...#....", "..#..##.", "..#.#..#", ".#..#..#", ".#...##.",
+    ];
+    let mut px = [[0u8; 16]; 16];
+    let h = bottom - top + 1;
+    for y in 0..h {
+        let row = SHAPE[y * SHAPE.len() / h.max(1)].as_bytes();
+        // Strokes two pixels wide, as the font's.
+        for (x, &c) in row.iter().enumerate() { if c == b'#' { px[top + y][x + 2] = fill; px[top + y][x + 3] = fill; } }
+    }
+    let shape = px;
+    for y in 0..16 { for x in 0..16 {
+        if shape[y][x] != fill { continue; }
+        for (dx, dy) in [(1i32, 1i32), (1, 0), (0, 1), (-1, 0), (0, -1), (-1, -1), (1, -1), (-1, 1)] {
+            let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+            if (0..16).contains(&nx) && (0..16).contains(&ny) && shape[ny as usize][nx as usize] == 0 && px[ny as usize][nx as usize] == 0 {
+                px[ny as usize][nx as usize] = if (dx, dy) == (1, 1) { shadow } else { edge };
+            }
+        }
+    } }
+    Some((px, 13))
 }
 
 fn text_width(rom: &[u8], label: &str) -> i32 {
@@ -177,6 +211,62 @@ pub fn draw(bus: &MemMap, out: &mut [i32], rw: usize, rh: usize, ex: usize, row_
         cx += advance as i32 - 1;
     }
 }
+
+/// Draws a window in the buttons' style into the texture: its bars over and
+/// under a translucent body `body_h` rows high, `w` wide, top left at texture
+/// (x0, y0); each line of text (in the menu font, `scale` times its size,
+/// highlighted while `active`) at its row in the body, from `left` columns in.
+pub fn draw_card(bus: &MemMap, out: &mut [i32], rw: usize, rh: usize, x0: i32, y0: i32, w: i32, body_h: i32, lines: &[(i32, i32, &str, bool, i32)]) {
+    let rom = &bus.rom;
+    if !available(rom) { return; }
+    let colors = crate::engine::rgba_colors();
+    let color = |palette: usize, index: u8| {
+        let o = PALETTES + (palette * 16 + index as usize) * 2;
+        u16::from_le_bytes([rom[o], rom[o + 1]]) & 0x7fff
+    };
+    let mut put = |x: i32, y: i32, c: u16, blend: bool| {
+        if !(0..rw as i32).contains(&x) || !(0..rh as i32).contains(&y) { return; }
+        let target = &mut out[y as usize * rw + x as usize];
+        let mut c = c;
+        if blend {
+            let under = *target as u32;
+            let world = ((under >> 19) & 31) | ((under >> 11) & 31) << 5 | ((under >> 3) & 31) << 10;
+            c = [0, 5, 10].iter().fold(0, |acc, &s| acc | ((((c as u32 >> s) & 31) * EVA + ((world >> s) & 31) * EVB) / 16).min(31) << s) as u16;
+            *target = colors[c as usize];
+        } else {
+            *target = colors[crate::world_map::faded(bus, c, 0x08) as usize];
+        }
+    };
+    let width = w as usize;
+    let bar = |y: i32, row: usize, put: &mut dyn FnMut(i32, i32, u16, bool)| {
+        for x in 0..width {
+            let (tile, tx) = if x < 8 { (&BAR_CAP, x) } else if x >= width - 8 { (&BAR_CAP, width - 1 - x) } else { (&BAR, x % 8) };
+            let index = tile_pixel(tile, tx, row);
+            if index != 0 { put(x0 + x as i32, y, color(FRAME, index), false); }
+        }
+    };
+    for (i, row) in [4, 3, 2, 1, 0].into_iter().enumerate() { bar(y0 + i as i32, row, &mut put); }
+    let body = y0 + 5;
+    for y in 0..body_h { for x in 0..w { put(x0 + x, body + y, color(FRAME, BODY_INDEX), true); } }
+    for row in 0..5 { bar(body + body_h + row as i32, row, &mut put); }
+    for &(left, top, text, active, scale) in lines {
+        let mut cx = x0 + left;
+        for ch in text.chars() {
+            let Some((pixels, advance)) = glyph(rom, ch) else { cx += 4 * scale; continue };
+            for (y, row) in pixels.iter().enumerate() {
+                for (x, &index) in row.iter().enumerate() {
+                    if index == 0 { continue; }
+                    for dy in 0..scale { for dx in 0..scale {
+                        put(cx + x as i32 * scale + dx, body + top + y as i32 * scale + dy, color(if active { TEXT_ACTIVE } else { FRAME }, index), false);
+                    } }
+                }
+            }
+            cx += (advance as i32 - 1) * scale;
+        }
+    }
+}
+/// Native width of `text` in the menu font at `scale`.
+pub fn text_width_scaled(rom: &[u8], text: &str, scale: i32) -> i32 { text_width(rom, text) * scale }
 
 /// Draws one menu-font glyph into a native UI canvas (`ffta_dialogue`
 /// pixels) with its 16x16 cell at native `cell`: the window text colours, or

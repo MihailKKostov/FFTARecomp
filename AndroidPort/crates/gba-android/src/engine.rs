@@ -129,6 +129,7 @@ pub struct Engine {
     /// System was opened from the unit's commands (battle_ui.rs): closing it goes back there.
     pub(crate) system_return: bool,
     pub(crate) free_return_after: Option<u64>,
+    pub(crate) flat: crate::battle_windows::Flat,
     /// Touch-only shop lists that scroll and swipe (shop_scroll.rs).
     pub(crate) shop_scroll: crate::shop_scroll::ShopScroll,
     pub(crate) gesture_slop: f32,
@@ -519,7 +520,7 @@ impl Engine {
     pub fn new(rom: Vec<u8>) -> Self {
         let rom_cache_key=gba_core::ffta_rom::digest(&rom);
         let mouse=gba_core::ffta_mouse::LanguageMouse::new(&rom,false);
-        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,laws:Default::default(),rumor_close:None,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,free_home:None,system_return:false,free_return_after:None,shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
+        Self { mouse,touch_enabled:false,ui_base:240.,ui_export_ns:0,ui_window:(240,160),ui_dock:None,town_menu:None,expanded:false,padded:false,world_map:Default::default(),menu_layout:None,party_cache:None,party_goal:None,party_scroll:0,party_shown:false,party_open_first:false,party_leave:None,party_bar:None,laws:Default::default(),rumor_close:None,shop_choice:(0,0),last_battery:None,resume_frame:0,menu_button:None,buttons:Vec::new(),shop_info:false,shop_info_pressed:0,shop_list_shown:0,gesture:None,free_home:None,system_return:false,free_return_after:None,flat:Default::default(),shop_scroll:Default::default(),gesture_slop:48.,quantity_flash:(false,0),top_row:false,hud_luma:(0,0),view_shift:0,world_rect:[0.,0.,240.,160.],machine: Box::new(Machine::new(rom)), code: None, extensions: Vec::new(), pending: None,
             missed: BTreeSet::new(), adaptive: cfg!(target_os="android"), pixels: Vec::new(),
             audio: Vec::with_capacity(4096), pcm: crate::audio::Audio::default(), native_blocks: 0,
             fallback_steps: 0, frame_ns: 0, prepare_ms: 0, save_path: None, skip_hidden_frames: true, cache_dir: None, cache_hit: false,
@@ -605,6 +606,7 @@ impl Engine {
         self.drive_gestures();
         self.shop_scroll_tick()?;
         self.laws_tick()?;
+        self.flat_tick()?;
         self.drive_party_flow();
         self.drive_pub();
         self.track_free_home();
@@ -671,6 +673,7 @@ impl Engine {
         self.shop_scroll_present();
         self.draw_quantity_arrows();
         if expanded_rows {self.laws_present(dock);} else {self.laws.area=None;self.laws.banner=None;}
+        if expanded_rows {self.battle_windows_present(dock);} else {self.flat.shown=Default::default();self.flat.hide_game=false;}
         let buttons=self.scene_buttons();
         let s=rect[3]/mem::render_height() as f32;
         self.laws.screen_area=self.laws.area.map(|(a,b)|(rect[1]+a as f32*s,rect[1]+b as f32*s));

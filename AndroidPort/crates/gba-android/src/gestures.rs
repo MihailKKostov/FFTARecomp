@@ -41,6 +41,9 @@ pub(crate) enum Gesture {
     /// chooses it; held, the game's cursor goes to it and its HELP is shown
     /// (SELECT) until the finger lifts (A closes it).
     Help { start: (f32, f32), since: u64, native: (f32, f32), row: u8, shown: bool },
+    /// A battle list dragged up or down: the game's list scrolls an entry for
+    /// each entry's height the finger moves (`done` steps taken).
+    ListDrag { start: (f32, f32), done: i32 },
 }
 
 /// Frames emulated per frame shown while a finger holds the battle on.
@@ -159,6 +162,15 @@ impl Engine {
             self.gesture = Some(Gesture::Unit { start: (x, y), moved: false, switched: false });
             return true;
         }
+        let screen = (x * self.ui_window.0 as f32, y * self.ui_window.1 as f32);
+        if let Some(pick) = self.battle_pick(screen.0, screen.1) {
+            let row = match pick { crate::battle_windows::Pick::Row(i) => Some(i), _ => None };
+            if let (Some(native), Some(row)) = (self.battle_pick_native(pick), row) {
+                self.gesture = Some(Gesture::Help { start: (x, y), since: self.machine.bus.frames, native, row, shown: false });
+                return true;
+            }
+            return false;
+        }
         if let Some(native) = self.docked_native(x, y).filter(|_| crate::battle_ui::window(&self.machine.bus).is_some()) {
             if let Some(row) = battle::MenuScene::read(&self.machine.bus).and_then(|m| m.hit(native.0, native.1)) {
                 self.gesture = Some(Gesture::Help { start: (x, y), since: self.machine.bus.frames, native, row, shown: false });
@@ -246,6 +258,24 @@ impl Engine {
                     e[CAMERA + 2..CAMERA + 4].copy_from_slice(&cy.to_le_bytes());
                 }
                 self.gesture = Some(Gesture::Pan { start, camera, moved });
+            }
+            Some(Gesture::Help { start, shown: false, .. }) if ((y - start.1) * h).abs() >= self.gesture_slop / 2. => {
+                self.gesture = Some(Gesture::ListDrag { start, done: 0 });
+                self.pointer_move(x, y);
+            }
+            Some(Gesture::ListDrag { start, done }) => {
+                // An entry is 16 native rows: the texture's scale on the screen.
+                let entry = 16. * self.texture_rect()[3] / gba_core::mem::render_height() as f32;
+                let want = (((start.1 - y) * h) / entry.max(1.)).trunc() as i32;
+                if want != done && battle::idle(&self.machine.bus) {
+                    if let Some(menu) = battle::MenuScene::read(&self.machine.bus) {
+                        // Past the last entry (finger up) or before the first: one step scrolls.
+                        let keys = if want > done { vec![0x37f; (menu.count - menu.selected) as usize] } else { vec![0x3bf; menu.selected as usize + 1] };
+                        self.mouse.cancel();
+                        battle::press_sequence(&mut self.machine.bus, &keys);
+                    }
+                    self.gesture = Some(Gesture::ListDrag { start, done: done + (want - done).signum() });
+                }
             }
             // Held anywhere: the finger may slide.
             Some(Gesture::Dialogue { .. } | Gesture::Turbo { .. } | Gesture::Help { .. }) | None => {}
